@@ -11,7 +11,16 @@ crate-type = ["cdylib"]
 
 [dependencies]
 dashmap = "6.1.0"
+smallvec = { version = "1.15", features = ["union", "const_generics"] }
 fancy-regex = "0.17.0"
 once_cell = "1.21.3"
 pyo3 = { version = "0.27.2", features = [ "generate-import-lib" ] }
 regex = "1.12.2"
+thiserror = "2.0.18"
+
+[profile.release]
+lto = "fat"          # Link Time Optimization: enables cross-crate optimizations
+codegen-units = 1    # Slower compile, but better code generation (allows more inlining)
+panic = "abort"      # Removes stack unwinding code, making binary smaller and slightly faster
+strip = true         # Removes symbols (optional, keeps binary small)
+opt-level = 3        # Maximum optimization
