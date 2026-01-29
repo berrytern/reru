@@ -1,0 +1,6 @@
+/target
+.venv/
+a.py
+dist/
+.python-version
+.intentionally-empty-file.o

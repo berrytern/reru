@@ -1,0 +1,42 @@
+[project]
+name = "reru"
+description = "A high-performance, drop-in replacement for Python's re module, powered by Rust."
+requires-python = ">=3.9"
+dependencies = []
+license = "Apache-2.0"
+license-files = ['LICENSE']
+authors = [{name = "João Pedro Miranda C. Hluchan", email = "berrytern@gmail.com"}]
+maintainers = [{name = "João Pedro Miranda C. Hluchan", email = "berrytern@gmail.com"}]
+keywords = ["regex", "rust", "performance", "re", "fast-re", "pyo3"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: General",
+]
+dynamic = ['version', 'readme']
+
+[build-system]
+requires = ["maturin>=1.11,<2.0"]
+build-backend = "maturin"
+
+
+[tool.uv]
+# Tells uv to install dependencies but NOT the project itself
+package = false
+
+[dependency-groups]
+dev = [
+    "maturin[zig]>=1.11.5",
+]
