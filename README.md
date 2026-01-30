@@ -45,6 +45,11 @@ if match:
     print(f"Start index: {match.start()}") # 0
     print(f"End index: {match.end()}")     # 11
 
+# Optimized usage
+RE1 = ReRu.compile(r"\d+")
+RE1.is_match("The answer is 42")
+RE2 = ReRu.compile(r"(\w+) world")
+RE2.search("hello world")
 ```
 
 ### Advanced Configuration
@@ -68,6 +73,11 @@ config = ReConfig(
 # Perform search with config
 match = ReRu.search(r"ERROR", "Critical error occurred", config=config)
 if match:
+    print("Found error!")
+
+# Or
+RE1 = ReRu.compile(r"ERROR", config=config)
+if RE1.match("Critical error occurred"):
     print("Found error!")
 
 ```
