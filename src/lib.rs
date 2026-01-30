@@ -7,6 +7,10 @@ use pyo3::types::PyString;
 use regex::{Regex, RegexBuilder};
 use fancy_regex::{Regex as Regex2, RegexBuilder as RegexBuilder2};
 use smallvec::{SmallVec,smallvec};
+mod exceptions;
+use exceptions::AppError;
+
+use crate::exceptions::ReError;
 
 
 type SpanVec = SmallVec<[(usize, usize); 8]>;
@@ -14,6 +18,11 @@ type SpanVec = SmallVec<[(usize, usize); 8]>;
 #[pyclass(frozen, freelist = 100)]
 pub struct Match {
     text: Py<PyString>, 
+    spans: SpanVec,
+}
+
+pub struct RuMatch {
+    text: String, 
     spans: SpanVec,
 }
 
@@ -48,6 +57,35 @@ impl Match {
     }
 
     fn lastindex(&self) -> usize {
+        self.spans.len().saturating_sub(1)
+    }
+}
+
+impl RuMatch {
+    pub fn start(&self) -> usize {
+        self.spans.first().map(|(s, _)| *s).unwrap_or(0)
+    }
+
+    pub fn end(&self) -> usize {
+        self.spans.first().map(|(_, e)| *e).unwrap_or(0)
+    }
+
+    pub fn group(&self, _i: i32) -> Result<String, AppError> {
+        let idx = _i as usize;
+        if let Some((start, end)) = self.spans.get(idx) {
+            Ok(unsafe { self.text.get_unchecked(*start..*end) }.to_string())
+        } else {
+             Err(AppError::IndexOutOfBounds(ReError { message: format!("Group {} not found", _i) }))
+        }
+    }
+
+    pub fn groups(&self, _i: i32) -> Result<Vec<Option<String>>, AppError> {
+        Ok(self.spans.iter().skip(1).map(|(s, e)| {
+            Some(unsafe { self.text.get_unchecked(*s..*e) }.to_string())
+        }).collect())
+    }
+
+    pub fn lastindex(&self) -> usize {
         self.spans.len().saturating_sub(1)
     }
 }
@@ -88,9 +126,39 @@ impl ReConfig {
 
 // --- REGEX STORAGE ---
 
-enum ReEngine {
+pub enum ReEngine {
     Std(Regex),
     Fancy(Regex2),
+}
+
+impl ReEngine {
+
+    pub fn is_match(&self, text: &str) -> bool {
+        match self {
+            ReEngine::Std(re) => re.is_match(text),
+            ReEngine::Fancy(re) => re.is_match(text).unwrap_or(false),
+        }
+    }
+
+    pub fn find(&self, text: &str) -> Option<(usize, usize)> {
+        match self {
+            ReEngine::Std(re) => re.find(text).map(|m| (m.start(), m.end())),
+            ReEngine::Fancy(re) => re.find(text).unwrap_or(None).map(|m| (m.start(), m.end())),
+        }
+    }
+
+    pub fn search(&self, text: &str) -> PyResult<Option<RuMatch>> {
+        
+        let spans = match &self {
+            ReEngine::Std(re) => re.captures(text).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
+            ReEngine::Fancy(re) => re.captures(text).unwrap_or(None).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
+        };
+
+        match spans {
+            Some(s) => Ok(Some(RuMatch { text: text.to_string(), spans: s })),
+            None => Ok(None)
+        }
+    }
 }
 
 type CacheMap = HashMap<String, ReEngine>;
@@ -185,10 +253,7 @@ struct Pattern {
 impl Pattern {
     pub fn is_match(&self, text: &Bound<'_, PyString>) -> PyResult<bool> {
         let text_slice = text.to_str()?;
-        Ok(match &self.engine {
-            ReEngine::Std(re) => re.is_match(text_slice),
-            ReEngine::Fancy(re) => re.is_match(text_slice).unwrap_or(false),
-        })
+        Ok(self.engine.is_match(text_slice))
     }
 
     #[pyo3(name = "match")]
@@ -208,12 +273,7 @@ impl Pattern {
 
     fn find_indices(&self, text: &Bound<'_, PyString>) -> PyResult<Option<(usize, usize)>> {
         let text_slice = text.to_str()?;
-        
-        let res = match &self.engine {
-            ReEngine::Std(re) => re.find(text_slice).map(|m| (m.start(), m.end())),
-            ReEngine::Fancy(re) => re.find(text_slice).unwrap_or(None).map(|m| (m.start(), m.end())),
-        };
-        Ok(res)
+        Ok(self.engine.find(text_slice))
     }
 
     pub fn search(&self, text: &Bound<'_, PyString>) -> PyResult<Option<Match>> {

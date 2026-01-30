@@ -1,7 +1,7 @@
 use std::error::Error as StdError;
 
-use pyo3::{PyErr, create_exception};
-use pyo3::exceptions::{PyException, PyValueError};
+use pyo3::{PyErr};
+use pyo3::exceptions::{PyException};
 use thiserror::Error;
 
 
