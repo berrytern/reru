@@ -26,6 +26,17 @@ pub struct RuMatch {
     spans: SpanVec,
 }
 
+impl From<RuMatch> for Match {
+    fn from(rm: RuMatch) -> Self {
+        Python::attach(|py| {
+            Match {
+                text: PyString::new(py, &rm.text).into(),
+                spans: rm.spans,
+            }
+        })
+    }
+}
+
 #[pymethods]
 impl Match {
     fn start(&self) -> usize {
@@ -147,8 +158,17 @@ impl ReEngine {
         }
     }
 
-    pub fn search(&self, text: &str) -> PyResult<Option<RuMatch>> {
-        
+    pub fn split(&self, text: &str) -> Vec<String> {
+        match self {
+            ReEngine::Std(re) => re.split(text).map(|s| s.to_string()).collect(),
+            ReEngine::Fancy(re) => {
+                re.split(text).filter_map(|res| res.ok().map(|x| x.to_string()))
+                .collect()
+            }
+        }
+    }
+
+    pub fn search(&self, text: &str) -> Result<Option<RuMatch>, AppError> {
         let spans = match &self {
             ReEngine::Std(re) => re.captures(text).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
             ReEngine::Fancy(re) => re.captures(text).unwrap_or(None).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
@@ -158,6 +178,17 @@ impl ReEngine {
             Some(s) => Ok(Some(RuMatch { text: text.to_string(), spans: s })),
             None => Ok(None)
         }
+    }
+
+    fn sub(&self, repl: &str, text: &str) -> Result<String, AppError> {
+        Ok(match &self {
+            ReEngine::Std(re) => re.replace_all(text, repl).into_owned(),
+            ReEngine::Fancy(re) => re.replace_all(text, repl).into_owned(),
+        })
+    }
+
+    fn escape(text: &str) -> Result<String, AppError> {
+        Ok(regex::escape(text))
     }
 }
 
@@ -278,7 +309,7 @@ impl Pattern {
 
     pub fn search(&self, text: &Bound<'_, PyString>) -> PyResult<Option<Match>> {
         let text_slice = text.to_str()?;
-        
+        // return self.engine.search(text_slice)?;
         let spans = match &self.engine {
             ReEngine::Std(re) => re.captures(text_slice).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
             ReEngine::Fancy(re) => re.captures(text_slice).unwrap_or(None).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
@@ -288,6 +319,11 @@ impl Pattern {
             Some(s) => Ok(Some(Match { text: text.clone().unbind(), spans: s })),
             None => Ok(None)
         }
+    }
+
+    pub fn sub(&self, repl: &str, text: &Bound<'_, PyString>) -> PyResult<String> {
+        let text_slice = text.to_str()?;
+        Ok(self.engine.sub(repl, text_slice)?)
     }
 }
 
@@ -461,5 +497,6 @@ fn reru(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ReConfig>()?;
     m.add_class::<ReRu>()?;
     m.add_class::<Pattern>()?;
+
     Ok(())
 }

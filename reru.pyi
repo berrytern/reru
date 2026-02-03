@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 
 class Match:
     def start(self) -> int: ...
@@ -31,3 +31,10 @@ class ReRu:
     def is_match(pattern: str, text: str, config: Optional[ReConfig] = None) -> bool: ...
     def match(pattern: str, text: str, config: Optional[ReConfig] = None) -> Optional[Match]: ...
     def search(pattern: str, text: str, config: Optional[ReConfig] = None) -> Optional[Match]: ...
+
+
+
+__version__: str
+__name__: str
+__package__: str
+__all__: List[str]
