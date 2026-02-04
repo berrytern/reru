@@ -235,20 +235,38 @@ impl ReEngine {
         })
     }
 
+    pub fn engine_info(&self) -> String {
+        match &self.inner {
+            EngineImpl::Std(_) => "regex".to_string(),
+            EngineImpl::Fancy(_) => "fancy_regex".to_string(),
+        }
+    }
+
     #[inline]
     pub fn escape(text: &str) -> Result<String, AppError> {
         Ok(regex::escape(text))
     }
 }
 
-type CacheMap = DashMap<String, Arc<ReEngine>>;
-type ConfigCacheMap = DashMap<(String, ReConfig), Arc<ReEngine>>;
+struct CachedPattern {
+    pub engine: Arc<ReEngine>,
+    pub match_engine: Arc<ReEngine>,
+}
+
+type CacheMap = DashMap<String, Arc<CachedPattern>>;
+type ConfigCacheMap = DashMap<(String, ReConfig), Arc<CachedPattern>>;
 
 static CACHE: Lazy<CacheMap> = Lazy::new(|| DashMap::with_capacity(100));
 static CONFIG_CACHE: Lazy<ConfigCacheMap> = Lazy::new(|| DashMap::with_capacity(10));
 
+#[pyclass]
+#[derive(Debug, Clone, Copy)]
+pub enum SelectEngine{
+    Std = 0,
+    Fancy = 1,
+}
 
-fn create_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, AppError> {
+fn std_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, AppError> {
     let mut builder = RegexBuilder::new(pattern);
     if let Some(cfg) = config {
         builder.multi_line(cfg.multiline)
@@ -268,6 +286,10 @@ fn create_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, A
         }
         return Ok(ReEngine{inner: EngineImpl::Std(re), group_map: Arc::new(map)});
     };
+    return Err(AppError::RegexError(ReError { message: "Failed to build regex with 'regex' engine.".to_string()}));
+}
+
+fn fancy_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, AppError> {
     let mut builder = RegexBuilder2::new(pattern);
     if let Some(cfg) = config {
         builder.multi_line(cfg.multiline)
@@ -293,6 +315,23 @@ fn create_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, A
     }
 }
 
+fn create_engine(pattern: &str, config: Option<&ReConfig>, engine: Option<SelectEngine>) -> Result<ReEngine, AppError> {
+    match engine {
+        None => {
+            match std_engine(pattern, config) {
+                Ok(re_engine) => Ok(re_engine),
+                Err(_) => fancy_engine(pattern, config)
+            }
+        },
+        Some(SelectEngine::Std) => {
+            std_engine(pattern, config)
+        },
+        Some(SelectEngine::Fancy) => {
+            fancy_engine(pattern, config)
+        },
+    }
+}
+
 // --- MAIN API ---
 
 #[pyclass(frozen)]
@@ -304,16 +343,23 @@ pub struct Pattern {
 
 #[pymethods]
 impl Pattern {
+    pub fn engine_info(&self) -> String {
+        self.engine.engine_info()
+    }
 
     pub fn group_names(&self) -> Vec<String> {
         let names: Vec<String> = self.engine.group_map.iter().map(|entry| entry.key().clone()).collect();
         names
     }
 
-
     pub fn is_search(&self, text: &Bound<'_, PyString>) -> PyResult<bool> {
         let text_slice = text.to_str()?;
         Ok(self.engine.is_search(text_slice))
+    }
+
+    pub fn is_match(&self, text: &Bound<'_, PyString>) -> PyResult<bool> {
+        let text_slice = text.to_str()?;
+        Ok(self.match_engine.is_search(text_slice))
     }
 
     pub fn find(&self, text: &Bound<'_, PyString>) -> PyResult<Option<Match>> {
@@ -384,79 +430,90 @@ impl Pattern {
 }
 
 fn has_match(pattern: &str) -> bool {
-    pattern.starts_with('^') || pattern.starts_with(r"\A")
+    let mut char_iter = pattern.chars();
+    match char_iter.next() {
+        Some('^') => true,
+        Some('\\') => {
+            match char_iter.next() {
+                Some('A') => true,
+                _ => false,
+            }
+        },
+        _ => false,
+    } 
 }
 
 
 #[pyfunction]
 #[pyo3(signature = (pattern, config=None))]
 pub fn compile(pattern: &str, config: Option<ReConfig>) -> Result<Pattern, AppError> {
+    if config.is_none() {
+        if let Some(entry) = CACHE.get(pattern) {
+            let cached = entry.value();
+            return Ok(Pattern {
+                engine: cached.engine.clone(),
+                match_engine: cached.match_engine.clone(),
+            });
+        }
+    } else  {
+        let cfg = config.unwrap();
+        let key = (pattern.to_string(), cfg); 
+        if let Some(entry) = CONFIG_CACHE.get(&key) {
+            let cached = entry.value();
+            return Ok(Pattern {
+                engine: cached.engine.clone(),
+                match_engine: cached.match_engine.clone(),
+            });
+        }
+    }
+    let has_anchored_start = has_match(pattern);
+    
+    let engine = Arc::new(create_engine(pattern, config.as_ref(), None)?);
+    let match_engine = if has_anchored_start {
+        engine.clone()
+    } else {
+        let modified_pattern = format!("^(?:{})", pattern);
+        Arc::new(create_engine(&modified_pattern, config.as_ref(), None)?)
+    };
+
+    let cached_entry = Arc::new(CachedPattern {
+        engine: engine.clone(),
+        match_engine: match_engine.clone(),
+    });
+
+    if let Some(cfg) = config {
+        CONFIG_CACHE.insert((pattern.to_string(), cfg), cached_entry);
+    } else {
+        CACHE.insert(pattern.to_string(), cached_entry);
+    }
+
+    Ok(Pattern { engine, match_engine })
+}
+
+#[pyfunction]
+#[pyo3(signature = (pattern, config=None, select_engine=None))]
+pub fn compile_custom(pattern: &str, config: Option<ReConfig>, select_engine: Option<SelectEngine>) -> Result<Pattern, AppError> {
     let has_match = has_match(pattern);
-    match config {
-        None => {
-            return match (has_match, CACHE.get(pattern)) {
-                (true, Some(entry)) => {
-                    let engine = Arc::clone(entry.value());
-                    Ok(Pattern { engine: Arc::clone(&engine), match_engine: engine })
-                },
-                (false, Some(entry)) => {
-                    let engine = Arc::clone(entry.value());
-                    let modified_pattern = format!("^(?:{})", pattern);
-                    let match_engine = if let Some(entry2) = CACHE.get(&modified_pattern) {
-                        Arc::clone(entry2.value())
-                    } else {
-                        let me = Arc::new(create_engine(&modified_pattern, None)?);
-                        CACHE.entry(modified_pattern).or_insert(Arc::clone(&me));
-                        me
-                    };
-                    Ok(Pattern { engine: Arc::clone(&engine), match_engine })
-                },
-                (true, None) => {
-                    let engine = Arc::new(create_engine(&pattern, None)?);
-                    Ok(Pattern { engine: Arc::clone(&engine), match_engine: engine })
-                },
-                (false, None) => {
-                    let engine = Arc::new(create_engine(&pattern, None)?);
-                    let modified_pattern = format!("^(?:{})", pattern);
-                    let match_engine = Arc::new(create_engine(&modified_pattern, None)?);
-                    CACHE.entry(pattern.to_string()).or_insert(Arc::clone(&engine));
-                    CACHE.entry(modified_pattern).or_insert(Arc::clone(&match_engine));
-                    Ok(Pattern { engine, match_engine })
-                }
-            };
+    match (config, has_match) {
+        (None, true) => {
+            let engine = Arc::new(create_engine(&pattern, None, select_engine)?);
+            Ok(Pattern { engine: Arc::clone(&engine), match_engine: engine })
         },
-        Some(cfg) => {
-            let key = (pattern.to_string(), cfg);
-            return match (has_match, CONFIG_CACHE.get(&key)) {
-                (true, Some(entry)) => {
-                    let engine = Arc::clone(entry.value());
-                    Ok(Pattern { engine: Arc::clone(&engine), match_engine: engine })
-                },
-                (false, Some(entry)) => {
-                    let engine = Arc::clone(entry.value());
-                    let modified_pattern = format!("^(?:{})", pattern);
-                    let match_engine = if let Some(entry2) = CONFIG_CACHE.get(&(modified_pattern.clone(), cfg)) {
-                        Arc::clone(entry2.value())
-                    } else {
-                        let me = Arc::new(create_engine(&modified_pattern, Some(&cfg))?);
-                        CONFIG_CACHE.entry((modified_pattern.clone(), cfg)).or_insert(Arc::clone(&me));
-                        me
-                    };
-                    Ok(Pattern { engine: Arc::clone(&engine), match_engine })
-                },
-                (true, None) => {
-                    let engine = Arc::new(create_engine(&pattern, Some(&cfg))?);
-                    Ok(Pattern { engine: Arc::clone(&engine), match_engine: engine })
-                },
-                (false, None) => {
-                    let engine = Arc::new(create_engine(&pattern, Some(&cfg))?);
-                    let modified_pattern = format!("^(?:{})", pattern);
-                    let match_engine = Arc::new(create_engine(&modified_pattern, Some(&cfg))?);
-                    CONFIG_CACHE.entry((pattern.to_string(), cfg)).or_insert(Arc::clone(&engine));
-                    CONFIG_CACHE.entry((modified_pattern.clone(), cfg)).or_insert(Arc::clone(&match_engine));
-                    Ok(Pattern { engine, match_engine })
-                }
-            };
+        (None, false) => {
+            let engine = Arc::new(create_engine(&pattern, None, select_engine)?);
+            let modified_pattern = format!("^(?:{})", pattern);
+            let match_engine = Arc::new(create_engine(&modified_pattern, None, select_engine)?);
+            Ok(Pattern { engine, match_engine })
+        },
+        (Some(cfg), true) => {
+            let engine = Arc::new(create_engine(&pattern, Some(&cfg), select_engine)?);
+            Ok(Pattern { engine: Arc::clone(&engine), match_engine: engine })
+        },
+        (Some(cfg), false) => {
+            let engine = Arc::new(create_engine(&pattern, Some(&cfg), select_engine)?);
+            let modified_pattern = format!("^(?:{})", pattern);
+            let match_engine = Arc::new(create_engine(&modified_pattern, Some(&cfg), select_engine)?);
+            Ok(Pattern { engine, match_engine })
         }
     }
 }
@@ -464,16 +521,8 @@ pub fn compile(pattern: &str, config: Option<ReConfig>) -> Result<Pattern, AppEr
 #[pyfunction]
 #[pyo3(signature = (pattern, text, config=None))]
 pub fn is_match(pattern: &str, text: &Bound<'_, PyString>, config: Option<ReConfig>) -> PyResult<bool> {
-    match pattern.chars().next() {
-        Some('^') => {
-            return is_search(pattern, text, config);
-        },
-        Some(_) =>  {
-            let modified_pattern = format!("^(?:{})", pattern);
-            return is_search(&modified_pattern, text, config);
-        },
-        None => Ok(true)
-    }
+    let pattern = compile(pattern, config)?;
+    pattern.is_match(text)
 }
 
 #[pyfunction]
@@ -513,6 +562,7 @@ fn reru(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Match>()?;
     m.add_class::<ReConfig>()?;
     m.add_class::<Pattern>()?;
+    m.add_class::<SelectEngine>()?;
     m.add_function(wrap_pyfunction!(compile, m)?)?;
     m.add_function(wrap_pyfunction!(is_match, m)?)?;
     m.add_function(wrap_pyfunction!(is_search, m)?)?;
