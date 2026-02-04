@@ -299,6 +299,7 @@ fn create_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, A
 #[derive(Debug,Clone)]
 pub struct Pattern {
     engine: Arc<ReEngine>,
+    match_engine: Arc<ReEngine>,
 }
 
 #[pymethods]
@@ -339,10 +340,14 @@ impl Pattern {
     #[pyo3(name = "match")]
     pub fn fmatch(&self, text: &Bound<'_, PyString>) -> PyResult<Option<Match>> {
         let text_slice = text.to_str()?;
-        let r = self.engine.fmatch(text_slice);
+        // return self.engine.search(text_slice)?; faster with code replication
+        let spans = match &self.match_engine.inner {
+            EngineImpl::Std(re) => re.captures(text_slice).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
+            EngineImpl::Fancy(re) => re.captures(text_slice).unwrap_or(None).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
+        };
 
-        match r {
-            Some(s) => Ok(Some(Match { text: text.clone().unbind(), spans: s.spans, group_map: s.group_map.clone() })),
+        match spans {
+            Some(s) => Ok(Some(Match { text: text.clone().unbind(), spans: s, group_map: self.engine.group_map.clone() })),
             None => Ok(None)
         }
     }
@@ -378,26 +383,80 @@ impl Pattern {
     }
 }
 
+fn has_match(pattern: &str) -> bool {
+    pattern.starts_with('^') || pattern.starts_with(r"\A")
+}
+
+
 #[pyfunction]
 #[pyo3(signature = (pattern, config=None))]
 pub fn compile(pattern: &str, config: Option<ReConfig>) -> Result<Pattern, AppError> {
+    let has_match = has_match(pattern);
     match config {
         None => {
-            if let Some(entry) = CACHE.get(pattern) {
-                return Ok(Pattern { engine: Arc::clone(entry.value()) });
-            }
-            let a = CACHE.entry(pattern.to_string()).or_insert(
-                Arc::new(create_engine(pattern, None)?));
-            Ok(Pattern { engine: Arc::clone(a.value()) })
+            return match (has_match, CACHE.get(pattern)) {
+                (true, Some(entry)) => {
+                    let engine = Arc::clone(entry.value());
+                    Ok(Pattern { engine: Arc::clone(&engine), match_engine: engine })
+                },
+                (false, Some(entry)) => {
+                    let engine = Arc::clone(entry.value());
+                    let modified_pattern = format!("^(?:{})", pattern);
+                    let match_engine = if let Some(entry2) = CACHE.get(&modified_pattern) {
+                        Arc::clone(entry2.value())
+                    } else {
+                        let me = Arc::new(create_engine(&modified_pattern, None)?);
+                        CACHE.entry(modified_pattern).or_insert(Arc::clone(&me));
+                        me
+                    };
+                    Ok(Pattern { engine: Arc::clone(&engine), match_engine })
+                },
+                (true, None) => {
+                    let engine = Arc::new(create_engine(&pattern, None)?);
+                    Ok(Pattern { engine: Arc::clone(&engine), match_engine: engine })
+                },
+                (false, None) => {
+                    let engine = Arc::new(create_engine(&pattern, None)?);
+                    let modified_pattern = format!("^(?:{})", pattern);
+                    let match_engine = Arc::new(create_engine(&modified_pattern, None)?);
+                    CACHE.entry(pattern.to_string()).or_insert(Arc::clone(&engine));
+                    CACHE.entry(modified_pattern).or_insert(Arc::clone(&match_engine));
+                    Ok(Pattern { engine, match_engine })
+                }
+            };
         },
         Some(cfg) => {
             let key = (pattern.to_string(), cfg);
-            
-            if let Some(entry) = CONFIG_CACHE.get(&key) {
-                return Ok(Pattern { engine: Arc::clone(entry.value()) });
-            }
-            let a = CONFIG_CACHE.entry((pattern.to_string(), cfg)).or_insert(Arc::new(create_engine(pattern, Some(&cfg))?));
-            Ok(Pattern { engine: Arc::clone(a.value()) })
+            return match (has_match, CONFIG_CACHE.get(&key)) {
+                (true, Some(entry)) => {
+                    let engine = Arc::clone(entry.value());
+                    Ok(Pattern { engine: Arc::clone(&engine), match_engine: engine })
+                },
+                (false, Some(entry)) => {
+                    let engine = Arc::clone(entry.value());
+                    let modified_pattern = format!("^(?:{})", pattern);
+                    let match_engine = if let Some(entry2) = CONFIG_CACHE.get(&(modified_pattern.clone(), cfg)) {
+                        Arc::clone(entry2.value())
+                    } else {
+                        let me = Arc::new(create_engine(&modified_pattern, Some(&cfg))?);
+                        CONFIG_CACHE.entry((modified_pattern.clone(), cfg)).or_insert(Arc::clone(&me));
+                        me
+                    };
+                    Ok(Pattern { engine: Arc::clone(&engine), match_engine })
+                },
+                (true, None) => {
+                    let engine = Arc::new(create_engine(&pattern, Some(&cfg))?);
+                    Ok(Pattern { engine: Arc::clone(&engine), match_engine: engine })
+                },
+                (false, None) => {
+                    let engine = Arc::new(create_engine(&pattern, Some(&cfg))?);
+                    let modified_pattern = format!("^(?:{})", pattern);
+                    let match_engine = Arc::new(create_engine(&modified_pattern, Some(&cfg))?);
+                    CONFIG_CACHE.entry((pattern.to_string(), cfg)).or_insert(Arc::clone(&engine));
+                    CONFIG_CACHE.entry((modified_pattern.clone(), cfg)).or_insert(Arc::clone(&match_engine));
+                    Ok(Pattern { engine, match_engine })
+                }
+            };
         }
     }
 }
