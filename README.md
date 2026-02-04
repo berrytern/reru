@@ -7,12 +7,12 @@ It combines the raw speed of Rust's linear-time regex engine with the flexibilit
 ## 🚀 Features
 
 * **Hybrid Engine Architecture**:
-* **Fast Path**: Uses the `regex` crate (linear time `O(n)`) for standard patterns, ensuring protection against ReDoS (Regular Expression Denial of Service).
-* **Feature Path**: Automatically switches to `fancy-regex` for patterns requiring look-arounds (`(?=...)`, `(?<=...)`) or backreferences (`\1`), maintaining compatibility with Python's standard regex features.
-
-
+    * **Fast Path**: Uses the `regex` crate (linear time `O(n)`) for standard patterns, ensuring protection against ReDoS (Regular Expression Denial of Service).
+    * **Feature Path**: Automatically switches to `fancy-regex` for patterns requiring look-arounds (`(?=...)`, `(?<=...)`) or backreferences (`\1`), maintaining compatibility with Python's standard regex features.
+* **Global Caching**: Compilations are cached efficiently using a thread-safe `DashMap`, making repeated calls lightning fast across threads.
 * **High Performance**: Implemented purely in Rust using `pyo3` and `maturin`.
-* **Built-in Caching**: Compilations are cached efficiently using a concurrent `DashMap` implementation, making repeated calls lightning fast.
+* **Rich API**: Supports standard methods like `match`, `search`, `findall`, and `sub`, plus named capture groups.
+* **Global Caching**: Compilations are cached efficiently using a thread-safe `DashMap`, making repeated calls lightning fast across threads.
 * **Type Safe**: Includes full type hints (`.pyi`) for better IDE integration and static analysis.
 * **Cross-Platform**: Pre-built wheels available for Linux (x86_64, aarch64, armv7, musl), macOS (Intel & Apple Silicon), and Windows (x64, x86, arm64).
 
@@ -27,7 +27,7 @@ pip install reru
 
 ## 🛠 Usage
 
-`reru` exposes a simple API similar to Python's standard `re` module but encapsulates methods within the `ReRu` class for optimized dispatch.
+`reru` exposes a simple API similar to Python's standard `re` module. Functions are available directly at the module level for optimized dispatch.
 
 ### Basic Matching and Searching
 
@@ -52,40 +52,64 @@ RE2 = reru.compile(r"(\w+) world")
 RE2.search("hello world")
 ```
 
-### Advanced Configuration
+### Named Groups and New Methods
+`reru` now supports named capture groups, `findall`, and `sub` (substitution).
 
-You can fine-tune the regex engine using `ReConfig`. This allows you to control case sensitivity, multiline modes, whitespace ignoring, and execution limits.
+
 
 ```python
-from reru import ReConfig
 import reru
 
-# Configure the regex engine
-config = ReConfig(
-    case_insensitive=True,
-    ignore_whitespace=False,
-    multiline=True,
-    unicode_mode=True,
-    size_limit=10 * (1 << 20),  # 10 MB size limit
-    dfa_size_limit=2 * (1 << 20), # 2 MB DFA limit
-    backtrack_limit=1_000_000     # Limit for backtracking engine
-)
-
-# Perform search with config
-match = reru.search(r"ERROR", "Critical error occurred", config=config)
+# Named Groups
+match = reru.match(r"(?P<year>\d{4})-(?P<month>\d{2})", "2024-05")
 if match:
-    print("Found error!")
+    print(match.group("year"))  # "2024"
+    print(match.group(1))       # "2024"
 
-# Or
-RE1 = reru.compile(r"ERROR", config=config)
-if RE1.match("Critical error occurred"):
-    print("Found error!")
+# Find All Matches
+results = reru.findall(r"\d+", "Items: 10, 20, 30")
+print(results) # ['10', '20', '30']
 
+# Substitution
+text = reru.sub(r"ERROR", "CRITICAL", "System status: ERROR")
+print(text) # "System status: CRITICAL"
 ```
+
+### Advanced Configuration
+You can fine-tune the regex engine using `ReConfig`. This allows you to control case sensitivity, multiline modes, whitespace ignoring, and execution limits.
+
+
+```python
+import reru
+
+# Named Groups
+match = reru.match(r"(?P<year>\d{4})-(?P<month>\d{2})", "2024-05")
+if match:
+    print(match.group("year"))  # "2024"
+    print(match.group(1))       # "2024"
+
+# Find All Matches
+results = reru.findall(r"\d+", "Items: 10, 20, 30")
+print(results) # ['10', '20', '30']
+
+# Substitution
+text = reru.sub(r"ERROR", "CRITICAL", "System status: ERROR")
+print(text) # "System status: CRITICAL"
+```
+
+### Engine Selection (Advanced)
+If you need to force a specific engine (ignoring the auto-detection), you can use `compile_custom`:
+```
+from reru import SelectEngine, compile_custom
+
+# Force the Standard Rust engine (strictly linear time)
+pat = compile_custom(r"\d+", select_engine=SelectEngine.Std)
+```
+
 
 ## ⚙️ How It Works
 
-Under the hood, `reru` inspects the byte-code of your pattern before compilation:
+reru uses a "Try-Fail" fallback strategy to ensure the best balance between performance and compatibility:
 
 1. **Inspection**: It checks for "expensive" features like look-aheads, look-behinds, and backreferences.
 2. **Selection**:
