@@ -109,7 +109,7 @@ pat = compile_custom(r"\d+", select_engine=SelectEngine.Std)
 
 ## ⚙️ How It Works
 
-Under the hood, `reru` inspects the byte-code of your pattern before compilation:
+reru uses a "Try-Fail" fallback strategy to ensure the best balance between performance and compatibility:
 
 1. **Inspection**: It checks for "expensive" features like look-aheads, look-behinds, and backreferences.
 2. **Selection**:
