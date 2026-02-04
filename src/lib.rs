@@ -41,6 +41,12 @@ impl From<RuMatch> for Match {
     }
 }
 
+#[derive(FromPyObject)]
+enum GroupId {
+    Index(usize),
+    Name(String),
+}
+
 #[pymethods]
 impl Match {
     fn start(&self) -> usize {
@@ -51,16 +57,13 @@ impl Match {
         self.spans.first().map(|(_, e)| *e).unwrap_or(0)
     }
 
-    #[pyo3(signature = (ident))]
-    fn group(&self, py: Python, ident: &Bound<'_, PyAny>) -> PyResult<String> {
-        let idx = if let Ok(i) = ident.extract::<usize>() {
-            i
-        } else if let Ok(name) = ident.extract::<String>() {
-            *self.group_map.get(&name).ok_or_else(|| {
+    #[pyo3(signature = (ident=GroupId::Index(0)))]
+    fn group(&self, py: Python, ident: GroupId) -> PyResult<String> {
+        let idx = match ident {
+            GroupId::Index(i) => i,
+            GroupId::Name(name) => *self.group_map.get(&name).ok_or_else(|| {
                 PyValueError::new_err(format!("Group name '{}' not defined", name))
             })?
-        } else {
-            return Err(PyValueError::new_err("Group argument must be int or str"));
         };
 
         if let Some((start, end)) = self.spans.get(idx) {
