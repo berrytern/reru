@@ -16,6 +16,12 @@ impl std::fmt::Display for ReError {
     }
 }
 
+impl From<ReError> for AppError {
+    fn from(error: ReError) -> Self {
+        AppError::RegexError(error)
+    }
+}
+
 pub enum AppError{
     RegexError(ReError),
     InvalidPattern(ReError),
