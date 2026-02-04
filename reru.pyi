@@ -114,6 +114,12 @@ class Pattern:
         """
         Return the string obtained by replacing the leftmost non-overlapping occurrences
         of the pattern in string by the replacement `repl`.
+
+        Args:
+            repl: The replacement string.
+            text: The input string to perform replacements on.
+        Returns:
+            The modified string with replacements.
         """
 
     @staticmethod
@@ -186,14 +192,75 @@ def compile_custom(
                        If None, auto-detection is used.
     """
 
-def is_match(pattern: str, text: str, config: Optional[ReConfig] = None) -> bool: ...
-def is_search(pattern: str, text: str, config: Optional[ReConfig] = None) -> bool: ...
+def is_match(pattern: str, text: str, config: Optional[ReConfig] = None) -> bool:
+    """
+    Checks if the pattern matches the string at the beginning.
 
-def match(pattern: str, text: str, config: Optional[ReConfig] = None) -> Optional[Match]: ...
-def search(pattern: str, text: str, config: Optional[ReConfig] = None) -> Optional[Match]: ...
+    This is faster than `match()` as it returns a boolean without allocating a Match object.
 
-def sub(pattern: str, repl: str, text: str, config: Optional[ReConfig] = None) -> str: ...
-def escape(text: str) -> str: ...
+    Args:
+        pattern: The regex string.
+        text: The input string to match against.
+        config: Optional configuration.
+    Returns:
+        True if the pattern matches at the start of `text`.
+    """
+def is_search(pattern: str, text: str, config: Optional[ReConfig] = None) -> bool: 
+    """
+    Checks if the pattern matches anywhere in the string.
+
+    This is faster than `search()` as it returns a boolean without allocating a Match object.
+
+    Args:
+        pattern: The regex string.
+        text: The input string to match against.
+        config: Optional configuration.
+    Returns:
+        True if the pattern is found anywhere in `text`.
+    """
+
+def match(pattern: str, text: str, config: Optional[ReConfig] = None) -> Optional[Match]:
+    """
+    Attempts to match the pattern at the beginning of the string.
+
+    Args:
+        pattern: The regex string.
+        text: The input string to match against.
+        config: Optional configuration.
+    Returns:
+        A Match object if found, otherwise None.
+    """
+
+def search(pattern: str, text: str, config: Optional[ReConfig] = None) -> Optional[Match]:
+    """
+    Searches for the pattern anywhere in the string.
+
+    Args:
+        pattern: The regex string.
+        text: The input string to match against.
+        config: Optional configuration.
+    Returns:
+        A Match object if found, otherwise None.
+    """
+
+def sub(pattern: str, repl: str, text: str, config: Optional[ReConfig] = None) -> str:
+    """
+    Return the string obtained by replacing the leftmost non-overlapping occurrences
+    of the pattern in string by the replacement `repl`.
+
+    Args:
+        pattern: The regex string.
+        repl: The replacement string.
+        text: The input string to perform replacements on.
+        config: Optional configuration.
+    Returns:
+        The modified string with replacements.
+    """
+
+def escape(text: str) -> str:
+    """
+    Escape special characters in a string.
+    """
 
 
 
