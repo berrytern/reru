@@ -32,23 +32,23 @@ pip install reru
 ### Basic Matching and Searching
 
 ```python
-from reru import ReRu
+import reru
 
 # Check if a pattern matches (returns bool)
-if ReRu.is_match(r"\d+", "The answer is 42"):
+if reru.is_match(r"\d+", "The answer is 42"):
     print("It's a match!")
 
 # Search for a pattern (returns a Match object or None)
-match = ReRu.search(r"(\w+) world", "hello world")
+match = reru.search(r"(\w+) world", "hello world")
 if match:
     print(f"Full match: {match.group()}") # "hello world"
     print(f"Start index: {match.start()}") # 0
     print(f"End index: {match.end()}")     # 11
 
 # Optimized usage
-RE1 = ReRu.compile(r"\d+")
+RE1 = reru.compile(r"\d+")
 RE1.is_match("The answer is 42")
-RE2 = ReRu.compile(r"(\w+) world")
+RE2 = reru.compile(r"(\w+) world")
 RE2.search("hello world")
 ```
 
@@ -57,7 +57,8 @@ RE2.search("hello world")
 You can fine-tune the regex engine using `ReConfig`. This allows you to control case sensitivity, multiline modes, whitespace ignoring, and execution limits.
 
 ```python
-from reru import ReRu, ReConfig
+from reru import ReConfig
+import reru
 
 # Configure the regex engine
 config = ReConfig(
@@ -71,12 +72,12 @@ config = ReConfig(
 )
 
 # Perform search with config
-match = ReRu.search(r"ERROR", "Critical error occurred", config=config)
+match = reru.search(r"ERROR", "Critical error occurred", config=config)
 if match:
     print("Found error!")
 
 # Or
-RE1 = ReRu.compile(r"ERROR", config=config)
+RE1 = reru.compile(r"ERROR", config=config)
 if RE1.match("Critical error occurred"):
     print("Found error!")
 
