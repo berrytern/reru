@@ -486,16 +486,8 @@ pub fn is_search(pattern: &str, text: &Bound<'_, PyString>, config: Option<ReCon
 #[pyfunction]
 #[pyo3(name = "match", signature = (pattern, text, config=None))]
 pub fn find(pattern: &str, text: &Bound<'_, PyString>, config: Option<ReConfig>) -> PyResult<Option<Match>> {
-    match pattern.chars().next() {
-        Some('^') => {
-            return search(pattern, text, config);
-        },
-        Some(_) =>  {
-            let modified_pattern = format!("^(?:{})", pattern);
-            return search(&modified_pattern, text, config);
-        },
-        None => Ok(None)
-    }
+    let pattern = compile(pattern, config)?;
+    pattern.fmatch(text)
 }
 
 #[pyfunction]
