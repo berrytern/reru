@@ -6,13 +6,13 @@ It combines the raw speed of Rust's linear-time regex engine with the flexibilit
 
 ## 🚀 Features
 
-* **Hybrid Engine Architecture**:
-    * **Fast Path**: Uses the `regex` crate (linear time `O(n)`) for standard patterns, ensuring protection against ReDoS (Regular Expression Denial of Service).
-    * **Feature Path**: Automatically switches to `fancy-regex` for patterns requiring look-arounds (`(?=...)`, `(?<=...)`) or backreferences (`\1`), maintaining compatibility with Python's standard regex features.
+* **Multi-Stage Hybrid Architecture**:
+    * **Tier 1 (Fastest)**: Uses the `regex` crate (linear time `O(n)`) for standard patterns, ensuring protection against ReDoS.
+    * **Tier 2 (High Performance)**: Automatically switches to `pcre2` (JIT-compiled) for patterns with look-arounds (`(?=...)`) or backreferences. It is significantly faster than standard backtracking engines.
+    * **Tier 3 (Fallback)**: Falls back to `fancy-regex` only for complex patterns not supported by the previous engines.
 * **Global Caching**: Compilations are cached efficiently using a thread-safe `DashMap`, making repeated calls lightning fast across threads.
 * **High Performance**: Implemented purely in Rust using `pyo3` and `maturin`.
 * **Rich API**: Supports standard methods like `match`, `search`, `findall`, and `sub`, plus named capture groups.
-* **Global Caching**: Compilations are cached efficiently using a thread-safe `DashMap`, making repeated calls lightning fast across threads.
 * **Type Safe**: Includes full type hints (`.pyi`) for better IDE integration and static analysis.
 * **Cross-Platform**: Pre-built wheels available for Linux (x86_64, aarch64, armv7, musl), macOS (Intel & Apple Silicon), and Windows (x64, x86, arm64).
 
@@ -55,8 +55,6 @@ RE2.search("hello world")
 ### Named Groups and New Methods
 `reru` now supports named capture groups, `findall`, and `sub` (substitution).
 
-
-
 ```python
 import reru
 
@@ -75,26 +73,41 @@ text = reru.sub(r"ERROR", "CRITICAL", "System status: ERROR")
 print(text) # "System status: CRITICAL"
 ```
 
-### Advanced Configuration
-You can fine-tune the regex engine using `ReConfig`. This allows you to control case sensitivity, multiline modes, whitespace ignoring, and execution limits.
 
+
+### ⚠ Important: Substitution Syntax Difference ($1 vs \1)
+
+Unlike Python's re module which uses \1 or \g<name> for backreferences in substitutions, `reru` passes the replacement string directly to the underlying Rust engines.
+
+<b>You must use Rust/PCRE syntax for substitutions:</b>
+
+- Use $1, $2 instead of \1, \2.
+
+- Use ${name} instead of \g<name>.
 
 ```python
 import reru
+import re
+
+# ❌ Python Standard Syntax (Doesn't work in reru)
+# re.sub(r"(\d+)", r"Value: \1", "100") 
+
+# ✅ reru Syntax (Rust Style)
+reru.sub(r"(\d+)", r"Value: $1", "100")
+# Output: "Value: 100"
 
 # Named Groups
-match = reru.match(r"(?P<year>\d{4})-(?P<month>\d{2})", "2024-05")
-if match:
-    print(match.group("year"))  # "2024"
-    print(match.group(1))       # "2024"
+reru.sub(r"(?P<val>\d+)", r"Value: ${val}", "100")
+```
 
-# Find All Matches
-results = reru.findall(r"\d+", "Items: 10, 20, 30")
-print(results) # ['10', '20', '30']
+### Advanced Configuration
+You can fine-tune the regex engine using `ReConfig`. This allows you to control case sensitivity, multiline modes, whitespace ignoring, and execution limits.
 
-# Substitution
-text = reru.sub(r"ERROR", "CRITICAL", "System status: ERROR")
-print(text) # "System status: CRITICAL"
+```python
+from reru import ReConfig
+
+config = ReConfig(case_insensitive=True, multiline=True)
+match = reru.search(r"hello", "HELLO world", config=config)
 ```
 
 ### Engine Selection (Advanced)
@@ -104,6 +117,9 @@ from reru import SelectEngine, compile_custom
 
 # Force the Standard Rust engine (strictly linear time)
 pat = compile_custom(r"\d+", select_engine=SelectEngine.Std)
+
+# Force Fancy engine (for full Python compatibility in substitution)
+pat_fancy = compile_custom(r"\d+", select_engine=SelectEngine.Fancy)
 ```
 
 
@@ -111,10 +127,11 @@ pat = compile_custom(r"\d+", select_engine=SelectEngine.Std)
 
 reru uses a "Try-Fail" fallback strategy to ensure the best balance between performance and compatibility:
 
-1. **Inspection**: It checks for "expensive" features like look-aheads, look-behinds, and backreferences.
-2. **Selection**:
-* If expensive features are **absent**, it uses Rust's `regex` crate. This guarantees linear time execution and is generally faster.
-* If expensive features are **present**, it falls back to `fancy-regex`. This supports the complex features Python developers expect while still benefiting from Rust's optimizations where possible.
+1. Stage 1 (Rust Regex): Attempts to compile with the `regex` crate. It guarantees linear time execution but doesn't support look-arounds or backreferences.
+
+2. Stage 2 (PCRE2): If Stage 1 fails, it attempts to compile with `pcre2`. This is a high-performance JIT-compiled engine that supports most complex features (look-arounds, etc.).
+
+3. Stage 3 (Fancy Regex): If PCRE2 fails or is unsuitable, it falls back to `fancy-regex` as a last resort to maintain maximum compatibility.
 
 
 

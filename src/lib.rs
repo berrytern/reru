@@ -364,7 +364,7 @@ fn pcre2_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, Ap
         builder.multi_line(cfg.multiline)
             .caseless(cfg.case_insensitive)
             .extended(cfg.ignore_whitespace)
-            .ucp(cfg.unicode_mode).jit_if_available(true);
+            .ucp(cfg.unicode_mode).jit(true);
     }
     match builder.build(pattern) {
         Ok(re) => {
