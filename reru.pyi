@@ -2,6 +2,7 @@ from typing import Optional, List, Union
 
 class SelectEngine:
     Std: int
+    Pcre2: int
     Fancy: int
 
 class Match:
@@ -57,7 +58,7 @@ class Pattern:
 
     def engine_info(self) -> str:
         """
-        Returns the name of the underlying engine being used ('regex' or 'fancy_regex').
+        Returns the name of the underlying engine being used ('regex', 'fancy_regex', or 'pcre2').
         """
 
     def group_names(self) -> List[str]:
