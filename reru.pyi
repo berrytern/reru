@@ -178,8 +178,8 @@ def compile(pattern: str, config: Optional[ReConfig] = None) -> Pattern:
     """
 
 def compile_custom(
-    pattern: str, 
-    config: Optional[ReConfig] = None, 
+    pattern: str,
+    config: Optional[ReConfig] = None,
     select_engine: Optional[SelectEngine] = None
 ) -> Pattern:
     """

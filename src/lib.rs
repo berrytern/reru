@@ -7,6 +7,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::types::PyString;
 use regex::{Regex, RegexBuilder};
 use fancy_regex::{Regex as Regex2, RegexBuilder as RegexBuilder2};
+use pcre2::bytes::{Regex as Pcre2Regex, RegexBuilder as Pcre2RegexBuilder};
 use smallvec::{SmallVec,smallvec};
 mod exceptions;
 use exceptions::AppError;
@@ -161,6 +162,7 @@ pub struct  ReEngine {
 #[derive(Debug, Clone)]
 pub enum EngineImpl {
     Std(Regex),
+    Pcre2(Pcre2Regex),
     Fancy(Regex2),
 }
 
@@ -170,6 +172,7 @@ impl ReEngine {
     pub fn is_search(&self, text: &str) -> bool {
         match &self.inner {
             EngineImpl::Std(re) => re.is_match(text),
+            EngineImpl::Pcre2(re) => re.is_match(text.as_bytes()).unwrap_or(false),
             EngineImpl::Fancy(re) => re.is_match(text).unwrap_or(false),
         }
     }
@@ -178,6 +181,7 @@ impl ReEngine {
     pub fn find(&self, text: &str) -> Option<(usize, usize)> {
         match &self.inner {
             EngineImpl::Std(re) => re.find(text).map(|m| (m.start(), m.end())),
+            EngineImpl::Pcre2(re) => re.find(text.as_bytes()).unwrap_or(None).map(|m| (m.start(), m.end())),
             EngineImpl::Fancy(re) => re.find(text).unwrap_or(None).map(|m| (m.start(), m.end())),
         }
     }
@@ -193,6 +197,18 @@ impl ReEngine {
                 } else {
                     None
                 }
+            }),
+            EngineImpl::Pcre2(re) => re.captures(text.as_bytes()).unwrap_or(None).and_then(|captures| {
+                 let mat = captures.get(0).unwrap();
+                 if mat.start() == 0 {
+                    let mut s = SpanVec::new();
+                    for i in 0..captures.len() {
+                        s.push(captures.get(i).map(|m| (m.start(), m.end())).unwrap_or((0,0)));
+                    }
+                    Some(RuMatch { text: text.to_string(), spans: s, group_map: self.group_map.clone() })
+                 } else {
+                     None
+                 }
             }),
             EngineImpl::Fancy(re) => re.captures(text).unwrap_or(None).and_then(|captures| {
                 let mat = captures.get(0).unwrap();
@@ -210,6 +226,19 @@ impl ReEngine {
     pub fn split(&self, text: &str) -> Vec<String> {
         match &self.inner {
             EngineImpl::Std(re) => re.split(text).map(|s| s.to_string()).collect(),
+            EngineImpl::Pcre2(re) => {
+                // PCRE2 doesn't have a direct split iterator in the crate, implementing via find_iter
+                let mut last = 0;
+                let mut parts = Vec::new();
+                for m in re.find_iter(text.as_bytes()) {
+                     let m = match m { Ok(m) => m, Err(_) => break };
+                     // Unsafe: PCRE2 UTF mode ensures these are valid char boundaries
+                     parts.push(unsafe { text.get_unchecked(last..m.start()) }.to_string());
+                     last = m.end();
+                }
+                parts.push(unsafe { text.get_unchecked(last..) }.to_string());
+                parts
+            },
             EngineImpl::Fancy(re) => {
                 re.split(text).filter_map(|res| res.ok().map(|x| x.to_string()))
                 .collect()
@@ -219,9 +248,24 @@ impl ReEngine {
 
     #[inline]
     pub fn search(&self, text: &str) -> Result<Option<RuMatch>, AppError> {
-        let spans = match &self.inner {
-            EngineImpl::Std(re) => re.captures(text).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
-            EngineImpl::Fancy(re) => re.captures(text).unwrap_or(None).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
+        let spans: Option<SpanVec> = match &self.inner {
+            EngineImpl::Std(re) => re.captures(text).map(|c| {
+                let mut s = SmallVec::with_capacity(c.len());
+                s.extend(c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))));
+                s
+            }),
+            EngineImpl::Pcre2(re) => re.captures(text.as_bytes()).unwrap_or(None).map(|c| {
+                let mut s = SmallVec::with_capacity(c.len());
+                for i in 0..c.len() {
+                    s.push(c.get(i).map(|m| (m.start(), m.end())).unwrap_or((0,0)));
+                }
+                s
+            }),
+            EngineImpl::Fancy(re) => re.captures(text).unwrap_or(None).map(|c| {
+                let mut s = SmallVec::with_capacity(c.len());
+                s.extend(c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))));
+                s
+            }),
         };
 
         match spans {
@@ -232,15 +276,35 @@ impl ReEngine {
 
     #[inline]
     pub fn sub(&self, repl: &str, text: &str) -> Result<String, AppError> {
-        Ok(match &self.inner {
-            EngineImpl::Std(re) => re.replace_all(text, repl).into_owned(),
-            EngineImpl::Fancy(re) => re.replace_all(text, repl).into_owned(),
-        })
+        match &self.inner {
+            EngineImpl::Std(re) => Ok(re.replace_all(text, repl).into_owned()),
+            EngineImpl::Pcre2(_re) => {
+                let text_bytes = text.as_bytes();
+                let repl_bytes = repl.as_bytes();
+
+                let mut new_bytes = Vec::with_capacity(text_bytes.len());
+                
+                let mut last_index = 0;
+
+                for mat in _re.find_iter(text_bytes) {
+                    if let Ok(m) = mat {
+                        new_bytes.extend_from_slice(&text_bytes[last_index..m.start()]);
+                        new_bytes.extend_from_slice(repl_bytes);
+                        last_index = m.end();
+                    }
+                }
+
+                new_bytes.extend_from_slice(&text_bytes[last_index..]);
+                Ok(unsafe { String::from_utf8_unchecked(new_bytes) })
+            },
+            EngineImpl::Fancy(re) => Ok(re.replace_all(text, repl).into_owned()),
+        }
     }
 
     pub fn engine_info(&self) -> String {
         match &self.inner {
             EngineImpl::Std(_) => "regex".to_string(),
+            EngineImpl::Pcre2(_) => "pcre2".to_string(),
             EngineImpl::Fancy(_) => "fancy_regex".to_string(),
         }
     }
@@ -263,10 +327,11 @@ static CACHE: Lazy<CacheMap> = Lazy::new(|| DashMap::with_capacity(100));
 static CONFIG_CACHE: Lazy<ConfigCacheMap> = Lazy::new(|| DashMap::with_capacity(10));
 
 #[pyclass]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectEngine{
     Std = 0,
     Fancy = 1,
+    Pcre2 = 2,
 }
 
 fn std_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, AppError> {
@@ -290,6 +355,31 @@ fn std_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, AppE
         return Ok(ReEngine{inner: EngineImpl::Std(re), group_map: Arc::new(map)});
     };
     return Err(AppError::RegexError(ReError { message: "Failed to build regex with 'regex' engine.".to_string()}));
+}
+
+fn pcre2_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, AppError> {
+    let mut builder = Pcre2RegexBuilder::new();
+    builder.utf(true); // Always enable UTF-8 for compatibility
+    if let Some(cfg) = config {
+        builder.multi_line(cfg.multiline)
+            .caseless(cfg.case_insensitive)
+            .extended(cfg.ignore_whitespace)
+            .ucp(cfg.unicode_mode).jit_if_available(true);
+    }
+    match builder.build(pattern) {
+        Ok(re) => {
+
+            let names = re.capture_names().iter().map(|n| n.clone());
+            let map = DashMap::new();
+            for (i, name_opt) in names.into_iter().enumerate() {
+                if let Some(name) = name_opt {
+                    map.insert(name, i);
+                }
+            }
+            Ok(ReEngine{inner: EngineImpl::Pcre2(re), group_map: Arc::new(map)})
+        },
+        Err(e) => Err(AppError::RegexError(ReError { message: format!("PCRE2 error: {}", e)})),
+    }
 }
 
 fn fancy_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, AppError> {
@@ -321,13 +411,19 @@ fn fancy_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, Ap
 fn create_engine(pattern: &str, config: Option<&ReConfig>, engine: Option<SelectEngine>) -> Result<ReEngine, AppError> {
     match engine {
         None => {
-            match std_engine(pattern, config) {
-                Ok(re_engine) => Ok(re_engine),
-                Err(_) => fancy_engine(pattern, config)
+            if let Ok(re_engine) = std_engine(pattern, config) {
+                Ok(re_engine)
+            } else if let Ok(pcre_engine) = pcre2_engine(pattern, config) {
+                Ok(pcre_engine)
+            } else {
+                fancy_engine(pattern, config)
             }
         },
         Some(SelectEngine::Std) => {
             std_engine(pattern, config)
+        },
+        Some(SelectEngine::Pcre2) => {
+             pcre2_engine(pattern, config)
         },
         Some(SelectEngine::Fancy) => {
             fancy_engine(pattern, config)
@@ -370,6 +466,7 @@ impl Pattern {
         
         let spans = match &self.engine.inner {
             EngineImpl::Std(re) => re.find(text_slice).map(|m| smallvec![(m.start(), m.end());1]),
+            EngineImpl::Pcre2(re) => re.find(text_slice.as_bytes()).unwrap_or(None).map(|m| smallvec![(m.start(), m.end());1]),
             EngineImpl::Fancy(re) => re.find(text_slice).unwrap_or(None).map(|m| smallvec![(m.start(), m.end());1]),
         };
 
@@ -382,6 +479,7 @@ impl Pattern {
     pub fn findall(&self, text: &str) -> PyResult<Vec<String>> {
         Ok(match &self.engine.inner {
             EngineImpl::Std(re) => re.find_iter(text).map(|mat| mat.as_str().to_string()).collect(),
+            EngineImpl::Pcre2(re) => re.find_iter(text.as_bytes()).filter_map(|res| res.ok().map(|mat| text[mat.start()..mat.end()].to_string())).collect(),
             EngineImpl::Fancy(re) => re.find_iter(text).filter_map(|res| res.ok().map(|mat| mat.as_str().to_string())).collect(),
         })
     }
@@ -390,9 +488,20 @@ impl Pattern {
     pub fn fmatch(&self, text: &Bound<'_, PyString>) -> PyResult<Option<Match>> {
         let text_slice = text.to_str()?;
         // return self.engine.search(text_slice)?; faster with code replication
-        let spans = match &self.match_engine.inner {
+        let spans: Option<SpanVec> = match &self.match_engine.inner {
             EngineImpl::Std(re) => re.captures(text_slice).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
-            EngineImpl::Fancy(re) => re.captures(text_slice).unwrap_or(None).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
+            EngineImpl::Pcre2(re) => re.captures(text_slice.as_bytes()).unwrap_or(None).map(|c| {
+                let mut s = SpanVec::new();
+                for i in 0..c.len() {
+                    s.push(c.get(i).map(|m| (m.start(), m.end())).unwrap_or((0,0)));
+                }
+                s
+            }),
+            EngineImpl::Fancy(re) => re.captures(text_slice).unwrap_or(None).map(|c| {
+                let mut s = SpanVec::with_capacity(c.len());
+                s.extend(c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))));
+                s
+            }),
         };
 
         match spans {
@@ -409,9 +518,24 @@ impl Pattern {
     pub fn search(&self, text: &Bound<'_, PyString>) -> PyResult<Option<Match>> {
         let text_slice = text.to_str()?;
         // return self.engine.search(text_slice)?; faster with code replication
-        let spans = match &self.engine.inner {
-            EngineImpl::Std(re) => re.captures(text_slice).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
-            EngineImpl::Fancy(re) => re.captures(text_slice).unwrap_or(None).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
+        let spans: Option<SpanVec> = match &self.engine.inner {
+            EngineImpl::Std(re) => re.captures(text_slice).map(|c| {
+                let mut s = SmallVec::with_capacity(c.len());
+                s.extend(c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))));
+                s
+            }),
+            EngineImpl::Pcre2(re) => re.captures(text_slice.as_bytes()).unwrap_or(None).map(|c| {
+                let mut s = SpanVec::new();
+                for i in 0..c.len() {
+                    s.push(c.get(i).map(|m| (m.start(), m.end())).unwrap_or((0,0)));
+                }
+                s
+            }),
+            EngineImpl::Fancy(re) => re.captures(text_slice).unwrap_or(None).map(|c| {
+                let mut s = SpanVec::new();
+                s.extend(c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))));
+                s
+            }),
         };
 
         match spans {
@@ -567,6 +691,7 @@ fn reru(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Pattern>()?;
     m.add_class::<SelectEngine>()?;
     m.add_function(wrap_pyfunction!(compile, m)?)?;
+    m.add_function(wrap_pyfunction!(compile_custom, m)?)?;
     m.add_function(wrap_pyfunction!(is_match, m)?)?;
     m.add_function(wrap_pyfunction!(is_search, m)?)?;
     m.add_function(wrap_pyfunction!(find, m)?)?;
