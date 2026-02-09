@@ -38,5 +38,5 @@ package = false
 
 [dependency-groups]
 dev = [
-    "maturin[zig]>=1.11.5",
+    "maturin[patchelf,zig]>=1.11.5",
 ]
