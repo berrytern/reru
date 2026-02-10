@@ -69,7 +69,7 @@ impl Match {
 
         if let Some((start, end)) = self.spans.get(idx) {
             let text = self.text.bind(py).to_str()?;
-            Ok(unsafe { text.get_unchecked(*start..*end) }.to_string())
+            Ok(text[*start..*end].to_string())
         } else {
             Err(PyValueError::new_err(format!("Group {} not found", idx)))
         }
