@@ -80,7 +80,7 @@ impl Match {
         let text = text_bind.to_str()?;
         
         Ok(self.spans.iter().skip(1).map(|(s, e)| {
-            Some(unsafe { text.get_unchecked(*s..*e) }.to_string())
+            Some(text[*s..*e].to_string())
         }).collect())
     }
 
@@ -101,7 +101,7 @@ impl RuMatch {
     pub fn group(&self, _i: i32) -> Result<String, AppError> {
         let idx = _i as usize;
         if let Some((start, end)) = self.spans.get(idx) {
-            Ok(unsafe { self.text.get_unchecked(*start..*end) }.to_string())
+            Ok(self.text[*start..*end].to_string())
         } else {
              Err(AppError::IndexOutOfBounds(ReError { message: format!("Group {} not found", _i) }))
         }
@@ -109,7 +109,7 @@ impl RuMatch {
 
     pub fn groups(&self, _i: i32) -> Result<Vec<Option<String>>, AppError> {
         Ok(self.spans.iter().skip(1).map(|(s, e)| {
-            Some(unsafe { self.text.get_unchecked(*s..*e) }.to_string())
+            Some(self.text[*s..*e].to_string())
         }).collect())
     }
 
@@ -231,12 +231,12 @@ impl ReEngine {
                 let mut last = 0;
                 let mut parts = Vec::new();
                 for m in re.find_iter(text.as_bytes()) {
-                     let m = match m { Ok(m) => m, Err(_) => break };
-                     // Unsafe: PCRE2 UTF mode ensures these are valid char boundaries
-                     parts.push(unsafe { text.get_unchecked(last..m.start()) }.to_string());
-                     last = m.end();
+                    let m = match m { Ok(m) => m, Err(_) => break };
+                    // Unsafe: PCRE2 UTF mode ensures these are valid char boundaries
+                    parts.push(text[last..m.start()].to_string());
+                    last = m.end();
                 }
-                parts.push(unsafe { text.get_unchecked(last..) }.to_string());
+                parts.push(text[last..].to_string());
                 parts
             },
             EngineImpl::Fancy(re) => {
