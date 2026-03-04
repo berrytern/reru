@@ -100,6 +100,18 @@ reru.sub(r"(\d+)", r"Value: $1", "100")
 reru.sub(r"(?P<val>\d+)", r"Value: ${val}", "100")
 ```
 
+### 🔍 Known Differences from Python's re
+
+While reru passes the vast majority of Python's standard `re` test suite, there are a few documented edge-case differences stemming from the underlying PCRE2 and Rust engines:
+
+1. Permissive Syntax Strictness: Python strictly errors out on mathematically redundant operators (like a** or ^*) throwing a "nothing to repeat" syntax error. reru is more permissive and will successfully compile these patterns (often treating them identically to a*).
+
+2. Numeric Backreference Limits: Python caps numeric backreferences at 99. A pattern like \119 in Python is evaluated as group 11 followed by the literal character 9. reru's engines may attempt to parse the entire 119 as the group reference or an octal, causing mismatches in extreme edge cases.
+
+3. Group Naming Validation: Python is highly strict about group names (e.g., throwing a hard re.error if a group name starts with a number like (?P<1>a)). `reru` will often return a standard match failure (None) rather than raising a Python syntax error.
+
+4. Additional PCRE Escapes: `reru` successfully parses some PCRE escape sequences that standard re does not, such as \z for end-of-string (Python strictly uses \Z).
+
 ### Advanced Configuration
 You can fine-tune the regex engine using `ReConfig`. This allows you to control case sensitivity, multiline modes, whitespace ignoring, and execution limits.
 
