@@ -22,10 +22,17 @@ impl From<ReError> for AppError {
     }
 }
 
+impl From<PyErr> for AppError {
+    fn from(error: PyErr) -> Self {
+        AppError::PyError(error)
+    }
+}
+
 pub enum AppError{
     RegexError(ReError),
     InvalidPattern(ReError),
     IndexOutOfBounds(ReError),
+    PyError(PyErr),
 }
 
 
@@ -35,6 +42,7 @@ impl StdError for AppError {
             AppError::RegexError(e) => Some(e),
             AppError::InvalidPattern(e) => Some(e),
             AppError::IndexOutOfBounds(e) => Some(e),
+            AppError::PyError(e) => Some(e),
         }
     }
 }
@@ -55,6 +63,7 @@ impl std::fmt::Display for AppError { // Error message for users.
             RegexError(_) => "Failed to read the file.",
             InvalidPattern(msg) =>  &msg.message,
             IndexOutOfBounds(msg) => &msg.message,
+            PyError(msg) => &msg.to_string(),
         };
         write!(f, "{message}")
     }

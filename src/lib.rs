@@ -1,10 +1,10 @@
 use std::hash::Hash;
 use std::sync::Arc;
 use dashmap::DashMap;
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy};
 use pyo3::{prelude::*};
-use pyo3::exceptions::PyValueError;
-use pyo3::types::PyString;
+use pyo3::exceptions::{PyValueError};
+use pyo3::types::{PyString, PyTuple};
 use regex::{Regex, RegexBuilder};
 use fancy_regex::{Regex as Regex2, RegexBuilder as RegexBuilder2};
 use pcre2::bytes::{Regex as Pcre2Regex, RegexBuilder as Pcre2RegexBuilder};
@@ -14,10 +14,11 @@ use exceptions::AppError;
 
 use crate::exceptions::ReError;
 
-
 type SpanVec = SmallVec<[(usize, usize); 8]>;
 
-#[pyclass(frozen, freelist = 100)]
+const NONE_SPAN: (usize, usize) = (usize::MAX, usize::MAX);
+
+#[pyclass(frozen, skip_from_py_object, freelist = 100)]
 pub struct Match {
     text: Py<PyString>, 
     spans: SpanVec,
@@ -25,7 +26,7 @@ pub struct Match {
 }
 
 pub struct RuMatch {
-    text: String, 
+    text: String,
     spans: SpanVec,
     group_map: Arc<DashMap<String, usize>>,
 }
@@ -59,29 +60,37 @@ impl Match {
     }
 
     #[pyo3(signature = (ident=GroupId::Index(0)))]
-    fn group(&self, py: Python, ident: GroupId) -> PyResult<String> {
+    fn group(slf: PyRef<'_, Self>, ident: GroupId) -> PyResult<Option<String>> {
         let idx = match ident {
             GroupId::Index(i) => i,
-            GroupId::Name(name) => *self.group_map.get(&name).ok_or_else(|| {
+            GroupId::Name(name) => *slf.group_map.get(&name).ok_or_else(|| {
                 PyValueError::new_err(format!("Group name '{}' not defined", name))
             })?
         };
 
-        if let Some((start, end)) = self.spans.get(idx) {
-            let text = self.text.bind(py).to_str()?;
-            Ok(text[*start..*end].to_string())
+        if let Some((start, end)) = slf.spans.get(idx) {
+            if *start == usize::MAX {
+                return Ok(None);
+            }
+            let py = slf.py();
+            let text = slf.text.to_str(py)?;
+            Ok(Some(text[*start..*end].to_string()))
         } else {
             Err(PyValueError::new_err(format!("Group {} not found", idx)))
         }
     }
 
-    fn groups(&self, py: Python) -> PyResult<Vec<Option<String>>> {
-        let text_bind = self.text.bind(py);
-        let text = text_bind.to_str()?;
-        
-        Ok(self.spans.iter().skip(1).map(|(s, e)| {
-            Some(text[*s..*e].to_string())
-        }).collect())
+    fn groups(slf: PyRef<'_, Self>) -> PyResult<Bound<'_, PyTuple>> {
+        let py = slf.py();
+        let text = slf.text.to_str(py)?;
+        let groups = slf.spans.iter().skip(1).map(|(s, e)| {
+            if *s == usize::MAX {
+                None
+            } else {
+                Some(text[*s..*e].to_string())
+            }
+        }).collect::<Vec<_>>();
+        PyTuple::new(py, groups)
     }
 
     fn lastindex(&self) -> usize {
@@ -120,7 +129,7 @@ impl RuMatch {
 
 // --- CONFIGURATION ---
 
-#[pyclass(frozen)]
+#[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ReConfig {
     case_insensitive: bool,
@@ -199,16 +208,16 @@ impl ReEngine {
                 }
             }),
             EngineImpl::Pcre2(re) => re.captures(text.as_bytes()).unwrap_or(None).and_then(|captures| {
-                 let mat = captures.get(0).unwrap();
-                 if mat.start() == 0 {
+                let mat = captures.get(0).unwrap();
+                if mat.start() == 0 {
                     let mut s = SpanVec::new();
                     for i in 0..captures.len() {
                         s.push(captures.get(i).map(|m| (m.start(), m.end())).unwrap_or((0,0)));
                     }
                     Some(RuMatch { text: text.to_string(), spans: s, group_map: self.group_map.clone() })
-                 } else {
-                     None
-                 }
+                } else {
+                    None
+                }
             }),
             EngineImpl::Fancy(re) => re.captures(text).unwrap_or(None).and_then(|captures| {
                 let mat = captures.get(0).unwrap();
@@ -227,12 +236,10 @@ impl ReEngine {
         match &self.inner {
             EngineImpl::Std(re) => re.split(text).map(|s| s.to_string()).collect(),
             EngineImpl::Pcre2(re) => {
-                // PCRE2 doesn't have a direct split iterator in the crate, implementing via find_iter
                 let mut last = 0;
                 let mut parts = Vec::new();
                 for m in re.find_iter(text.as_bytes()) {
                     let m = match m { Ok(m) => m, Err(_) => break };
-                    // Unsafe: PCRE2 UTF mode ensures these are valid char boundaries
                     parts.push(text[last..m.start()].to_string());
                     last = m.end();
                 }
@@ -251,7 +258,7 @@ impl ReEngine {
         let spans: Option<SpanVec> = match &self.inner {
             EngineImpl::Std(re) => re.captures(text).map(|c| {
                 let mut s = SmallVec::with_capacity(c.len());
-                s.extend(c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))));
+                s.extend(c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or(NONE_SPAN)));
                 s
             }),
             EngineImpl::Pcre2(re) => re.captures(text.as_bytes()).unwrap_or(None).map(|c| {
@@ -286,12 +293,10 @@ impl ReEngine {
                 
                 let mut last_index = 0;
 
-                for mat in _re.find_iter(text_bytes) {
-                    if let Ok(m) = mat {
-                        new_bytes.extend_from_slice(&text_bytes[last_index..m.start()]);
-                        new_bytes.extend_from_slice(repl_bytes);
-                        last_index = m.end();
-                    }
+                for m in _re.find_iter(text_bytes).flatten() {
+                    new_bytes.extend_from_slice(&text_bytes[last_index..m.start()]);
+                    new_bytes.extend_from_slice(repl_bytes);
+                    last_index = m.end();
                 }
 
                 new_bytes.extend_from_slice(&text_bytes[last_index..]);
@@ -326,8 +331,8 @@ type ConfigCacheMap = DashMap<(String, ReConfig), Arc<CachedPattern>>;
 static CACHE: Lazy<CacheMap> = Lazy::new(|| DashMap::with_capacity(100));
 static CONFIG_CACHE: Lazy<ConfigCacheMap> = Lazy::new(|| DashMap::with_capacity(10));
 
-#[pyclass]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[pyclass(skip_from_py_object)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum SelectEngine{
     Std = 0,
     Fancy = 1,
@@ -354,7 +359,7 @@ fn std_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, AppE
         }
         return Ok(ReEngine{inner: EngineImpl::Std(re), group_map: Arc::new(map)});
     };
-    return Err(AppError::RegexError(ReError { message: "Failed to build regex with 'regex' engine.".to_string()}));
+    Err(AppError::RegexError(ReError { message: "Failed to build regex with 'regex' engine.".to_string()}))
 }
 
 fn pcre2_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, AppError> {
@@ -368,8 +373,7 @@ fn pcre2_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, Ap
     }
     match builder.build(pattern) {
         Ok(re) => {
-
-            let names = re.capture_names().iter().map(|n| n.clone());
+            let names = re.capture_names().iter().cloned();
             let map = DashMap::new();
             for (i, name_opt) in names.into_iter().enumerate() {
                 if let Some(name) = name_opt {
@@ -408,7 +412,7 @@ fn fancy_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, Ap
     }
 }
 
-fn create_engine(pattern: &str, config: Option<&ReConfig>, engine: Option<SelectEngine>) -> Result<ReEngine, AppError> {
+fn create_engine(pattern: &str, config: Option<&ReConfig>, engine: Option<&SelectEngine>) -> Result<ReEngine, AppError> {
     match engine {
         None => {
             if let Ok(re_engine) = std_engine(pattern, config) {
@@ -433,7 +437,7 @@ fn create_engine(pattern: &str, config: Option<&ReConfig>, engine: Option<Select
 
 // --- MAIN API ---
 
-#[pyclass(frozen)]
+#[pyclass(frozen, skip_from_py_object)]
 #[derive(Debug,Clone)]
 pub struct Pattern {
     engine: Arc<ReEngine>,
@@ -491,7 +495,7 @@ impl Pattern {
         let spans: Option<SpanVec> = match &self.match_engine.inner {
             EngineImpl::Std(re) => re.captures(text_slice).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
             EngineImpl::Pcre2(re) => re.captures(text_slice.as_bytes()).unwrap_or(None).map(|c| {
-                let mut s = SpanVec::new();
+                let mut s = SpanVec::with_capacity(c.len());
                 for i in 0..c.len() {
                     s.push(c.get(i).map(|m| (m.start(), m.end())).unwrap_or((0,0)));
                 }
@@ -520,21 +524,17 @@ impl Pattern {
         // return self.engine.search(text_slice)?; faster with code replication
         let spans: Option<SpanVec> = match &self.engine.inner {
             EngineImpl::Std(re) => re.captures(text_slice).map(|c| {
-                let mut s = SmallVec::with_capacity(c.len());
-                s.extend(c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))));
-                s
+                c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or(NONE_SPAN)).collect()
             }),
             EngineImpl::Pcre2(re) => re.captures(text_slice.as_bytes()).unwrap_or(None).map(|c| {
-                let mut s = SpanVec::new();
+                let mut s = SpanVec::with_capacity(c.len());
                 for i in 0..c.len() {
-                    s.push(c.get(i).map(|m| (m.start(), m.end())).unwrap_or((0,0)));
+                    s.push(c.get(i).map(|m| (m.start(), m.end())).unwrap_or(NONE_SPAN));
                 }
                 s
             }),
             EngineImpl::Fancy(re) => re.captures(text_slice).unwrap_or(None).map(|c| {
-                let mut s = SpanVec::new();
-                s.extend(c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))));
-                s
+                c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or(NONE_SPAN)).collect()
             }),
         };
 
@@ -561,10 +561,7 @@ fn has_match(pattern: &str) -> bool {
     match char_iter.next() {
         Some('^') => true,
         Some('\\') => {
-            match char_iter.next() {
-                Some('A') => true,
-                _ => false,
-            }
+            matches!(char_iter.next(), Some('A'))
         },
         _ => false,
     } 
@@ -573,18 +570,9 @@ fn has_match(pattern: &str) -> bool {
 
 #[pyfunction]
 #[pyo3(signature = (pattern, config=None))]
-pub fn compile(pattern: &str, config: Option<ReConfig>) -> Result<Pattern, AppError> {
-    if config.is_none() {
-        if let Some(entry) = CACHE.get(pattern) {
-            let cached = entry.value();
-            return Ok(Pattern {
-                engine: cached.engine.clone(),
-                match_engine: cached.match_engine.clone(),
-            });
-        }
-    } else  {
-        let cfg = config.unwrap();
-        let key = (pattern.to_string(), cfg); 
+pub fn compile(pattern: &str, config: Option<&ReConfig>) -> Result<Pattern, AppError> {
+    if let Some(cfg) = config {
+        let key = (pattern.to_string(), *cfg); 
         if let Some(entry) = CONFIG_CACHE.get(&key) {
             let cached = entry.value();
             return Ok(Pattern {
@@ -592,15 +580,22 @@ pub fn compile(pattern: &str, config: Option<ReConfig>) -> Result<Pattern, AppEr
                 match_engine: cached.match_engine.clone(),
             });
         }
+    } else if let Some(entry) = CACHE.get(pattern) {
+        let cached = entry.value();
+        return Ok(Pattern {
+            engine: cached.engine.clone(),
+            match_engine: cached.match_engine.clone(),
+        });
     }
+    
     let has_anchored_start = has_match(pattern);
     
-    let engine = Arc::new(create_engine(pattern, config.as_ref(), None)?);
+    let engine = Arc::new(create_engine(pattern, config, None)?);
     let match_engine = if has_anchored_start {
         engine.clone()
     } else {
         let modified_pattern = format!("^(?:{})", pattern);
-        Arc::new(create_engine(&modified_pattern, config.as_ref(), None)?)
+        Arc::new(create_engine(&modified_pattern, config, None)?)
     };
 
     let cached_entry = Arc::new(CachedPattern {
@@ -609,7 +604,7 @@ pub fn compile(pattern: &str, config: Option<ReConfig>) -> Result<Pattern, AppEr
     });
 
     if let Some(cfg) = config {
-        CONFIG_CACHE.insert((pattern.to_string(), cfg), cached_entry);
+        CONFIG_CACHE.insert((pattern.to_string(), *cfg), cached_entry);
     } else {
         CACHE.insert(pattern.to_string(), cached_entry);
     }
@@ -619,27 +614,27 @@ pub fn compile(pattern: &str, config: Option<ReConfig>) -> Result<Pattern, AppEr
 
 #[pyfunction]
 #[pyo3(signature = (pattern, config=None, select_engine=None))]
-pub fn compile_custom(pattern: &str, config: Option<ReConfig>, select_engine: Option<SelectEngine>) -> Result<Pattern, AppError> {
+pub fn compile_custom(pattern: &str, config: Option<&ReConfig>, select_engine: Option<&SelectEngine>) -> Result<Pattern, AppError> {
     let has_match = has_match(pattern);
     match (config, has_match) {
         (None, true) => {
-            let engine = Arc::new(create_engine(&pattern, None, select_engine)?);
+            let engine = Arc::new(create_engine(pattern, None, select_engine)?);
             Ok(Pattern { engine: Arc::clone(&engine), match_engine: engine })
         },
         (None, false) => {
-            let engine = Arc::new(create_engine(&pattern, None, select_engine)?);
+            let engine = Arc::new(create_engine(pattern, None, select_engine)?);
             let modified_pattern = format!("^(?:{})", pattern);
             let match_engine = Arc::new(create_engine(&modified_pattern, None, select_engine)?);
             Ok(Pattern { engine, match_engine })
         },
         (Some(cfg), true) => {
-            let engine = Arc::new(create_engine(&pattern, Some(&cfg), select_engine)?);
+            let engine = Arc::new(create_engine(pattern, Some(cfg), select_engine)?);
             Ok(Pattern { engine: Arc::clone(&engine), match_engine: engine })
         },
         (Some(cfg), false) => {
-            let engine = Arc::new(create_engine(&pattern, Some(&cfg), select_engine)?);
+            let engine = Arc::new(create_engine(pattern, Some(cfg), select_engine)?);
             let modified_pattern = format!("^(?:{})", pattern);
-            let match_engine = Arc::new(create_engine(&modified_pattern, Some(&cfg), select_engine)?);
+            let match_engine = Arc::new(create_engine(&modified_pattern, Some(cfg), select_engine)?);
             Ok(Pattern { engine, match_engine })
         }
     }
@@ -647,41 +642,41 @@ pub fn compile_custom(pattern: &str, config: Option<ReConfig>, select_engine: Op
 
 #[pyfunction]
 #[pyo3(signature = (pattern, text, config=None))]
-pub fn is_match(pattern: &str, text: &Bound<'_, PyString>, config: Option<ReConfig>) -> PyResult<bool> {
+pub fn is_match(pattern: &str, text: &Bound<'_, PyString>, config: Option<&ReConfig>) -> PyResult<bool> {
     let pattern = compile(pattern, config)?;
     pattern.is_match(text)
 }
 
 #[pyfunction]
 #[pyo3(signature = (pattern, text, config=None))]
-pub fn is_search(pattern: &str, text: &Bound<'_, PyString>, config: Option<ReConfig>) -> PyResult<bool> {
+pub fn is_search(pattern: &str, text: &Bound<'_, PyString>, config: Option<&ReConfig>) -> PyResult<bool> {
     let pattern = compile(pattern, config)?;
     pattern.is_search(text)
 }
 
 #[pyfunction]
 #[pyo3(name = "match", signature = (pattern, text, config=None))]
-pub fn find(pattern: &str, text: &Bound<'_, PyString>, config: Option<ReConfig>) -> PyResult<Option<Match>> {
+pub fn find(pattern: &str, text: &Bound<'_, PyString>, config: Option<&ReConfig>) -> PyResult<Option<Match>> {
     let pattern = compile(pattern, config)?;
     pattern.fmatch(text)
 }
 
 #[pyfunction]
 #[pyo3(signature = (pattern, text, config=None))]
-pub fn search(pattern: &str, text: &Bound<'_, PyString>, config: Option<ReConfig>) -> PyResult<Option<Match>> {
+pub fn search(pattern: &str, text: &Bound<'_, PyString>, config: Option<&ReConfig>) -> PyResult<Option<Match>> {
     let pattern = compile(pattern, config)?;
     pattern.search(text)
 }
 #[pyfunction]
 #[pyo3(signature = (pattern, repl, text, config=None))]
-pub fn sub(pattern: &str, repl: &str, text: &Bound<'_, PyString>, config: Option<ReConfig>) -> PyResult<String> {
+pub fn sub(pattern: &str, repl: &str, text: &Bound<'_, PyString>, config: Option<&ReConfig>) -> PyResult<String> {
     let pattern = compile(pattern, config)?;
     pattern.sub(repl, text)
 }
 #[pyfunction]
 #[pyo3(signature = (text))]
 pub fn escape(text: &Bound<'_, PyString>) -> PyResult<String> {
-    Ok(Pattern::escape(text)?)
+    Pattern::escape(text)
 }
 
 #[pymodule]
