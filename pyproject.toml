@@ -39,4 +39,6 @@ package = false
 [dependency-groups]
 dev = [
     "maturin[patchelf,zig]>=1.11.5",
+    "pytest>=8.4.2",
 ]
+    
