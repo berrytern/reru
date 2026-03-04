@@ -20,12 +20,12 @@ for ver in "${py_versions[@]}"; do
     uv python pin "$ver"
     uv sync
     for target in "${targets_mac[@]}"; do
-        maturin build --release --target "$target" --strip --zig --out "$output_dir" -i "$ver"
+        uv run maturin build --release --target "$target" --strip --zig --out "$output_dir" -i "$ver"
     done
     for target in "${targets_linux[@]}"; do
-        maturin build --release --target "$target" --strip --zig --out "$output_dir" -i "$ver"
+        uv run maturin build --release --target "$target" --strip --zig --out "$output_dir" -i "$ver"
     done
     for target in "${targets_windows[@]}"; do
-        maturin build --release --target "$target" --strip --zig --out "$output_dir" -i "$ver"
+        uv run maturin build --release --target "$target" --strip --zig --out "$output_dir" -i "$ver"
     done
 done

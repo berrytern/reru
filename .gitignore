@@ -4,3 +4,4 @@ a.py
 dist/
 .python-version
 .intentionally-empty-file.o
+__pycache__/
