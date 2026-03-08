@@ -38,6 +38,7 @@ package = false
 
 [dependency-groups]
 dev = [
+    "matplotlib>=3.9.4",
     "maturin[patchelf,zig]>=1.11.5",
     "pytest>=8.4.2",
 ]
