@@ -462,7 +462,7 @@ fn create_engine(pattern: &str, config: Option<&ReConfig>, engine: Option<&Selec
     let config = &config.map(|a| *a).unwrap_or_default();
     match engine {
         None => {
-            if config.case_insensitive && let Some(lit) = extract_dotstar_literal(pattern) {
+            if !config.case_insensitive && let Some(lit) = extract_dotstar_literal(pattern) {
                 if let Ok(pcre_engine) = pcre2_engine(pattern, config) {
                     Ok(ReEngine { inner: EngineImpl::LiteralScan { literal: Arc::from(lit), fallback: Arc::new(pcre_engine) }, group_map: Arc::new(DashMap::new()) })
                 } else {
