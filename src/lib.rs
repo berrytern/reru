@@ -417,6 +417,7 @@ fn pcre2_engine(pattern: &str, config: &ReConfig) -> Result<ReEngine, AppError> 
         .caseless(config.case_insensitive)
         .extended(config.ignore_whitespace)
         .ucp(config.unicode_mode);
+    builder.jit_if_available(true);
     match builder.build(pattern) {
         Ok(re) => {
             let names = re.capture_names().iter().cloned();
