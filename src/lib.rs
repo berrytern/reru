@@ -26,7 +26,7 @@ pub struct Match {
 }
 
 pub struct RuMatch {
-    text: String,
+    text: Arc<str>, 
     spans: SpanVec,
     group_map: Arc<DashMap<String, usize>>,
 }
@@ -140,6 +140,19 @@ pub struct ReConfig {
     dfa_size_limit: usize,
     backtrack_limit: Option<usize>,
 }
+impl Default for ReConfig {
+    fn default() -> Self {
+        ReConfig {
+            case_insensitive: false,
+            ignore_whitespace: false,
+            multiline: false,
+            unicode_mode: true,
+            size_limit: None,
+            dfa_size_limit: 10_000_000,
+            backtrack_limit: None,
+        }
+    }
+}
 
 #[pymethods]
 impl ReConfig {
@@ -173,6 +186,10 @@ pub enum EngineImpl {
     Std(Regex),
     Pcre2(Pcre2Regex),
     Fancy(Regex2),
+    LiteralScan {
+        literal: Arc<str>,
+        fallback: Arc<ReEngine>,  // Std ou Pcre2 para sub/split
+    },
 }
 
 impl ReEngine {
@@ -183,6 +200,9 @@ impl ReEngine {
             EngineImpl::Std(re) => re.is_match(text),
             EngineImpl::Pcre2(re) => re.is_match(text.as_bytes()).unwrap_or(false),
             EngineImpl::Fancy(re) => re.is_match(text).unwrap_or(false),
+            EngineImpl::LiteralScan { literal, fallback } => {
+                memchr::memmem::find(text.as_bytes(), literal.as_bytes()).is_some()
+            }
         }
     }
 
@@ -192,42 +212,45 @@ impl ReEngine {
             EngineImpl::Std(re) => re.find(text).map(|m| (m.start(), m.end())),
             EngineImpl::Pcre2(re) => re.find(text.as_bytes()).unwrap_or(None).map(|m| (m.start(), m.end())),
             EngineImpl::Fancy(re) => re.find(text).unwrap_or(None).map(|m| (m.start(), m.end())),
+            EngineImpl::LiteralScan { literal, fallback } => {
+                memchr::memmem::find(text.as_bytes(), literal.as_bytes())
+                    .map(|pos| (pos, pos + literal.len()))
+            },
+        }
+    }
+
+    pub fn findall(&self, text: &str) -> Vec<String> {
+        match &self.inner {
+            EngineImpl::Std(re) => re.find_iter(text).map(|mat| mat.as_str().to_string()).collect(),
+            EngineImpl::Pcre2(re) => re.find_iter(text.as_bytes()).filter_map(|res| res.ok().map(|mat| text[mat.start()..mat.end()].to_string())).collect(),
+            EngineImpl::Fancy(re) => re.find_iter(text).filter_map(|res| res.ok().map(|mat| mat.as_str().to_string())).collect(),
+            EngineImpl::LiteralScan { literal, fallback } => fallback.findall(text),
         }
     }
 
     #[inline]
     pub fn fmatch(&self, text: &str) -> Option<RuMatch> {
-        match &self.inner {
-            EngineImpl::Std(re) => re.captures(text).and_then(|captures| {
-                let mat = captures.get(0).unwrap();
-                if mat.start() == 0 {
-                    let s = captures.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect();
-                    Some(RuMatch { text: text.to_string(), spans: s, group_map: self.group_map.clone() })
-                } else {
-                    None
+        let spans = match &self.inner {
+            EngineImpl::Std(re) => re.captures(text).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
+            EngineImpl::Pcre2(re) => re.captures(text.as_bytes()).unwrap_or(None).map(|c| {
+                let mut s = SpanVec::with_capacity(c.len());
+                for i in 0..c.len() {
+                    s.push(c.get(i).map(|m| (m.start(), m.end())).unwrap_or((0,0)));
                 }
+                s
             }),
-            EngineImpl::Pcre2(re) => re.captures(text.as_bytes()).unwrap_or(None).and_then(|captures| {
-                let mat = captures.get(0).unwrap();
-                if mat.start() == 0 {
-                    let mut s = SpanVec::new();
-                    for i in 0..captures.len() {
-                        s.push(captures.get(i).map(|m| (m.start(), m.end())).unwrap_or((0,0)));
-                    }
-                    Some(RuMatch { text: text.to_string(), spans: s, group_map: self.group_map.clone() })
-                } else {
-                    None
-                }
+            EngineImpl::Fancy(re) => re.captures(text).unwrap_or(None).map(|c| {
+                let mut s = SpanVec::with_capacity(c.len());
+                s.extend(c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))));
+                s
             }),
-            EngineImpl::Fancy(re) => re.captures(text).unwrap_or(None).and_then(|captures| {
-                let mat = captures.get(0).unwrap();
-                if mat.start() == 0 {
-                    let s = captures.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect();
-                    Some(RuMatch { text: text.to_string(), spans: s, group_map: self.group_map.clone() })
-                } else {
-                    None
-                }
-            }),
+            EngineImpl::LiteralScan { literal, fallback } => {
+                return fallback.fmatch(text);
+            },
+        };
+        match spans {
+            Some(s) => Some(RuMatch { text: Arc::from(text), spans: s, group_map: self.group_map.clone() }),
+            None => None
         }
     }
 
@@ -250,34 +273,36 @@ impl ReEngine {
                 re.split(text).filter_map(|res| res.ok().map(|x| x.to_string()))
                 .collect()
             }
+            EngineImpl::LiteralScan { literal, fallback } => {
+                fallback.split(text)
+            },
         }
     }
 
     #[inline]
-    pub fn search(&self, text: &str) -> Result<Option<RuMatch>, AppError> {
+    pub fn search(&self, text: &str) -> Option<RuMatch> {
         let spans: Option<SpanVec> = match &self.inner {
             EngineImpl::Std(re) => re.captures(text).map(|c| {
-                let mut s = SmallVec::with_capacity(c.len());
-                s.extend(c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or(NONE_SPAN)));
-                s
+                c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or(NONE_SPAN)).collect()
             }),
             EngineImpl::Pcre2(re) => re.captures(text.as_bytes()).unwrap_or(None).map(|c| {
-                let mut s = SmallVec::with_capacity(c.len());
+                let mut s = SpanVec::with_capacity(c.len());
                 for i in 0..c.len() {
-                    s.push(c.get(i).map(|m| (m.start(), m.end())).unwrap_or((0,0)));
+                    s.push(c.get(i).map(|m| (m.start(), m.end())).unwrap_or(NONE_SPAN));
                 }
                 s
             }),
             EngineImpl::Fancy(re) => re.captures(text).unwrap_or(None).map(|c| {
-                let mut s = SmallVec::with_capacity(c.len());
-                s.extend(c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))));
-                s
+                c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or(NONE_SPAN)).collect()
             }),
+            EngineImpl::LiteralScan { literal, fallback } => {
+                return fallback.search(text)
+            },
         };
 
         match spans {
-            Some(s) => Ok(Some(RuMatch { text: text.to_string(), spans: s, group_map: self.group_map.clone() })),
-            None => Ok(None)
+            Some(s) => Some(RuMatch { text: Arc::from(text), spans: s, group_map: self.group_map.clone() }),
+            None => None
         }
     }
 
@@ -303,6 +328,9 @@ impl ReEngine {
                 Ok(unsafe { String::from_utf8_unchecked(new_bytes) })
             },
             EngineImpl::Fancy(re) => Ok(re.replace_all(text, repl).into_owned()),
+            EngineImpl::LiteralScan { literal, fallback } => {
+                return fallback.sub(repl, text)
+            },
         }
     }
 
@@ -311,6 +339,7 @@ impl ReEngine {
             EngineImpl::Std(_) => "regex".to_string(),
             EngineImpl::Pcre2(_) => "pcre2".to_string(),
             EngineImpl::Fancy(_) => "fancy_regex".to_string(),
+            EngineImpl::LiteralScan { literal, fallback } => format!("literal_scan({})", fallback.engine_info()),
         }
     }
 
@@ -339,16 +368,35 @@ pub enum SelectEngine{
     Pcre2 = 2,
 }
 
-fn std_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, AppError> {
-    let mut builder = RegexBuilder::new(pattern);
-    if let Some(cfg) = config {
-        builder.multi_line(cfg.multiline)
-            .case_insensitive(cfg.case_insensitive)
-            .ignore_whitespace(cfg.ignore_whitespace)
-            .unicode(cfg.unicode_mode)
-            .dfa_size_limit(cfg.dfa_size_limit);
-        if let Some(sl) = cfg.size_limit { builder.size_limit(sl); }
+fn extract_dotstar_literal(pattern: &str) -> Option<&str> {
+    // Aceita apenas:
+    //   .*LITERAL
+    //   .*LITERAL.*
+    //   LITERAL        (sem .* = busca simples também se beneficia)
+    
+    let s = pattern.strip_prefix(".*").unwrap_or(pattern);
+    let core = s.strip_suffix(".*").unwrap_or(s);
+
+    if core.is_empty() {
+        return None;
     }
+
+    // Rejeita qualquer metacaractere regex
+    let is_pure_literal = !core.bytes().any(|b| {
+        b"[]()|+?*^${}\\. \t\n\r".contains(&b)
+    });
+
+    if is_pure_literal { Some(core) } else { None }
+}
+
+fn std_engine(pattern: &str, config: &ReConfig) -> Result<ReEngine, AppError> {
+    let mut builder: RegexBuilder = RegexBuilder::new(pattern);
+    builder.multi_line(config.multiline)
+        .case_insensitive(config.case_insensitive)
+        .ignore_whitespace(config.ignore_whitespace)
+        .unicode(config.unicode_mode)
+        .dfa_size_limit(config.dfa_size_limit);
+    if let Some(sl) = config.size_limit { builder.size_limit(sl); }
     if let Ok(re) = builder.build(){
         let names = re.capture_names().map(|n| n.map(|s| s.to_string()));
         let map = DashMap::new();
@@ -362,15 +410,14 @@ fn std_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, AppE
     Err(AppError::RegexError(ReError { message: "Failed to build regex with 'regex' engine.".to_string()}))
 }
 
-fn pcre2_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, AppError> {
+fn pcre2_engine(pattern: &str, config: &ReConfig) -> Result<ReEngine, AppError> {
     let mut builder = Pcre2RegexBuilder::new();
     builder.utf(true); // Always enable UTF-8 for compatibility
-    if let Some(cfg) = config {
-        builder.multi_line(cfg.multiline)
-            .caseless(cfg.case_insensitive)
-            .extended(cfg.ignore_whitespace)
-            .ucp(cfg.unicode_mode).jit(true);
-    }
+    builder.multi_line(config.multiline)
+        .caseless(config.case_insensitive)
+        .extended(config.ignore_whitespace)
+        .ucp(config.unicode_mode);
+    builder.jit_if_available(true);
     match builder.build(pattern) {
         Ok(re) => {
             let names = re.capture_names().iter().cloned();
@@ -386,17 +433,15 @@ fn pcre2_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, Ap
     }
 }
 
-fn fancy_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, AppError> {
+fn fancy_engine(pattern: &str, config: &ReConfig) -> Result<ReEngine, AppError> {
     let mut builder = RegexBuilder2::new(pattern);
-    if let Some(cfg) = config {
-        builder.multi_line(cfg.multiline)
-                .case_insensitive(cfg.case_insensitive)
-                .ignore_whitespace(cfg.ignore_whitespace)
-                .unicode_mode(cfg.unicode_mode)
-                .delegate_dfa_size_limit(cfg.dfa_size_limit);
-        if let Some(bl) = cfg.backtrack_limit { builder.backtrack_limit(bl); }
-        if let Some(sl) = cfg.size_limit { builder.delegate_size_limit(sl); }
-    }
+    builder.multi_line(config.multiline)
+        .case_insensitive(config.case_insensitive)
+        .ignore_whitespace(config.ignore_whitespace)
+        .unicode_mode(config.unicode_mode)
+        .delegate_dfa_size_limit(config.dfa_size_limit);
+    if let Some(bl) = config.backtrack_limit { builder.backtrack_limit(bl); }
+    if let Some(sl) = config.size_limit { builder.delegate_size_limit(sl); }
     match builder.build() {
         Ok(re) => {
             let names = re.capture_names().map(|n| n.map(|s| s.to_string()));
@@ -412,10 +457,25 @@ fn fancy_engine(pattern: &str, config: Option<&ReConfig>) -> Result<ReEngine, Ap
     }
 }
 
+
 fn create_engine(pattern: &str, config: Option<&ReConfig>, engine: Option<&SelectEngine>) -> Result<ReEngine, AppError> {
+    let config = &config.map(|a| *a).unwrap_or_default();
     match engine {
         None => {
-            if let Ok(re_engine) = std_engine(pattern, config) {
+            if config.case_insensitive && let Some(lit) = extract_dotstar_literal(pattern) {
+                if let Ok(pcre_engine) = pcre2_engine(pattern, config) {
+                    Ok(ReEngine { inner: EngineImpl::LiteralScan { literal: Arc::from(lit), fallback: Arc::new(pcre_engine) }, group_map: Arc::new(DashMap::new()) })
+                } else {
+                    let engine = fancy_engine(pattern, config)?;
+                    Ok(ReEngine { inner: EngineImpl::LiteralScan { literal: Arc::from(lit), fallback: Arc::new(engine) }, group_map: Arc::new(DashMap::new()) })
+                }
+            } else if pattern.contains(".*"){
+                if let Ok(pcre_engine) = pcre2_engine(pattern, config) {
+                    Ok(pcre_engine)
+                } else {
+                    fancy_engine(pattern, config)
+                }
+            } else if let Ok(re_engine) = std_engine(pattern, config) {
                 Ok(re_engine)
             } else if let Ok(pcre_engine) = pcre2_engine(pattern, config) {
                 Ok(pcre_engine)
@@ -455,61 +515,36 @@ impl Pattern {
         names
     }
 
-    pub fn is_search(&self, text: &Bound<'_, PyString>) -> PyResult<bool> {
-        let text_slice = text.to_str()?;
-        Ok(self.engine.is_search(text_slice))
+    pub fn is_search(&self, text: &str) -> PyResult<bool> {
+        Ok(self.engine.is_search(text))
     }
 
-    pub fn is_match(&self, text: &Bound<'_, PyString>) -> PyResult<bool> {
-        let text_slice = text.to_str()?;
-        Ok(self.match_engine.is_search(text_slice))
+    pub fn is_match(&self, text: &str) -> PyResult<bool> {
+        Ok(self.match_engine.is_search(text))
     }
 
     pub fn find(&self, text: &Bound<'_, PyString>) -> PyResult<Option<Match>> {
         let text_slice = text.to_str()?;
-        
-        let spans = match &self.engine.inner {
-            EngineImpl::Std(re) => re.find(text_slice).map(|m| smallvec![(m.start(), m.end());1]),
-            EngineImpl::Pcre2(re) => re.find(text_slice.as_bytes()).unwrap_or(None).map(|m| smallvec![(m.start(), m.end());1]),
-            EngineImpl::Fancy(re) => re.find(text_slice).unwrap_or(None).map(|m| smallvec![(m.start(), m.end());1]),
-        };
+        let m =self.engine.find(text_slice).map(|(s, e)| Match { text: text.clone().unbind(), spans: smallvec![(s, e)], group_map: self.engine.group_map.clone() });
 
-        match spans {
-            Some(s) => Ok(Some(Match { text: text.clone().unbind(), spans: s, group_map: self.engine.group_map.clone() })),
+        match m {
+            Some(m) => Ok(Some(m)),
             None => Ok(None)
         }
     }
 
     pub fn findall(&self, text: &str) -> PyResult<Vec<String>> {
-        Ok(match &self.engine.inner {
-            EngineImpl::Std(re) => re.find_iter(text).map(|mat| mat.as_str().to_string()).collect(),
-            EngineImpl::Pcre2(re) => re.find_iter(text.as_bytes()).filter_map(|res| res.ok().map(|mat| text[mat.start()..mat.end()].to_string())).collect(),
-            EngineImpl::Fancy(re) => re.find_iter(text).filter_map(|res| res.ok().map(|mat| mat.as_str().to_string())).collect(),
-        })
+        return Ok(self.engine.findall(text));
     }
 
     #[pyo3(name = "match")]
     pub fn fmatch(&self, text: &Bound<'_, PyString>) -> PyResult<Option<Match>> {
         let text_slice = text.to_str()?;
         // return self.engine.search(text_slice)?; faster with code replication
-        let spans: Option<SpanVec> = match &self.match_engine.inner {
-            EngineImpl::Std(re) => re.captures(text_slice).map(|c| c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))).collect()),
-            EngineImpl::Pcre2(re) => re.captures(text_slice.as_bytes()).unwrap_or(None).map(|c| {
-                let mut s = SpanVec::with_capacity(c.len());
-                for i in 0..c.len() {
-                    s.push(c.get(i).map(|m| (m.start(), m.end())).unwrap_or((0,0)));
-                }
-                s
-            }),
-            EngineImpl::Fancy(re) => re.captures(text_slice).unwrap_or(None).map(|c| {
-                let mut s = SpanVec::with_capacity(c.len());
-                s.extend(c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or((0,0))));
-                s
-            }),
-        };
-
-        match spans {
-            Some(s) => Ok(Some(Match { text: text.clone().unbind(), spans: s, group_map: self.engine.group_map.clone() })),
+        let matchs = self.match_engine.fmatch(text_slice);
+        
+        match matchs {
+            Some(m) => Ok(Some(m.into())),
             None => Ok(None)
         }
     }
@@ -522,24 +557,10 @@ impl Pattern {
     pub fn search(&self, text: &Bound<'_, PyString>) -> PyResult<Option<Match>> {
         let text_slice = text.to_str()?;
         // return self.engine.search(text_slice)?; faster with code replication
-        let spans: Option<SpanVec> = match &self.engine.inner {
-            EngineImpl::Std(re) => re.captures(text_slice).map(|c| {
-                c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or(NONE_SPAN)).collect()
-            }),
-            EngineImpl::Pcre2(re) => re.captures(text_slice.as_bytes()).unwrap_or(None).map(|c| {
-                let mut s = SpanVec::with_capacity(c.len());
-                for i in 0..c.len() {
-                    s.push(c.get(i).map(|m| (m.start(), m.end())).unwrap_or(NONE_SPAN));
-                }
-                s
-            }),
-            EngineImpl::Fancy(re) => re.captures(text_slice).unwrap_or(None).map(|c| {
-                c.iter().map(|m| m.map(|x| (x.start(), x.end())).unwrap_or(NONE_SPAN)).collect()
-            }),
-        };
+        let matchs = self.engine.search(text_slice);
 
-        match spans {
-            Some(s) => Ok(Some(Match { text: text.clone().unbind(), spans: s, group_map: self.engine.group_map.clone() })),
+        match matchs {
+            Some(m) => Ok(Some(m.into())),
             None => Ok(None)
         }
     }
@@ -642,14 +663,14 @@ pub fn compile_custom(pattern: &str, config: Option<&ReConfig>, select_engine: O
 
 #[pyfunction]
 #[pyo3(signature = (pattern, text, config=None))]
-pub fn is_match(pattern: &str, text: &Bound<'_, PyString>, config: Option<&ReConfig>) -> PyResult<bool> {
+pub fn is_match(pattern: &str, text: &str, config: Option<&ReConfig>) -> PyResult<bool> {
     let pattern = compile(pattern, config)?;
     pattern.is_match(text)
 }
 
 #[pyfunction]
 #[pyo3(signature = (pattern, text, config=None))]
-pub fn is_search(pattern: &str, text: &Bound<'_, PyString>, config: Option<&ReConfig>) -> PyResult<bool> {
+pub fn is_search(pattern: &str, text: &str, config: Option<&ReConfig>) -> PyResult<bool> {
     let pattern = compile(pattern, config)?;
     pattern.is_search(text)
 }
