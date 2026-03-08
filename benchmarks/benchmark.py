@@ -43,7 +43,8 @@ def run_benchmarks():
                 setup=f"import reru; text = {text!r}; reru.is_search({pattern!r}, text)",
                 number=iterations
             )
-            
+            # import reru
+            # print(pattern, reru.compile(pattern).engine_info())  # Pre-compile pattern for fair timing
             # Calculate speedup multiplier
             speedup = re_time / reru_time if reru_time > 0 else 0
             
